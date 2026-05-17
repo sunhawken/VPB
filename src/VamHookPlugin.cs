@@ -874,6 +874,7 @@ namespace VPB
             GenericTextureHook.PatchAll(m_Harmony);
             DAZClothingHook.PatchAll(m_Harmony);
             ThirdPartyFixHook.PatchAll(m_Harmony);
+            ImageLoaderThreadedHook.PatchAll(m_Harmony);
 
             // Zstd support is now handled by ZstdNet (auto-initialized)
 
