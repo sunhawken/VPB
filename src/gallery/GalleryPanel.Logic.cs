@@ -533,12 +533,14 @@ namespace VPB
                     return false;
             }
 
-            if (br.HasFlag(GallerySearchQuery.StatusFlags.Starred))
+            if (br.HasFlag(GallerySearchQuery.StatusFlags.Starred)
+                || br.HasFlag(GallerySearchQuery.StatusFlags.Unrated))
             {
                 int r = 0;
                 try { r = RatingsManager.Instance != null ? RatingsManager.Instance.GetRating(file) : 0; }
                 catch { r = 0; }
-                if (r <= 0) return false;
+                if (br.HasFlag(GallerySearchQuery.StatusFlags.Starred) && r <= 0) return false;
+                if (br.HasFlag(GallerySearchQuery.StatusFlags.Unrated) && r > 0) return false;
             }
             if (br.HasFlag(GallerySearchQuery.StatusFlags.AutoInstall))
             {
@@ -810,6 +812,53 @@ namespace VPB
             return pathOk;
         }
 
+        /// <summary>
+        /// True for Person Appearance look paths only.
+        /// Used when Appearance package scan skips category-root path match (non-Local source) —
+        /// without this, <c>json|vap</c> pulls Custom/SubScene/*.json into the Appearance grid
+        /// (and Load Random then loads SubScenes/scenes).
+        /// </summary>
+        internal static bool IsAppearanceLookInternalPath(string checkPath)
+        {
+            if (string.IsNullOrEmpty(checkPath)) return false;
+            string p = GalleryNormalizePathSlashes(checkPath);
+            // Strip package prefix "Creator.Pkg.1:/" if present.
+            int sep = p.IndexOf(":/", StringComparison.Ordinal);
+            if (sep >= 0 && sep + 2 < p.Length)
+                p = p.Substring(sep + 2);
+
+            if (p.StartsWith("Custom/Atom/Person/Appearance/", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(p, "Custom/Atom/Person/Appearance", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (p.StartsWith("Saves/Person/appearance/", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(p, "Saves/Person/appearance", StringComparison.OrdinalIgnoreCase)
+                || p.StartsWith("Saves/Person/Appearance/", StringComparison.OrdinalIgnoreCase))
+                return true;
+            return false;
+        }
+
+        /// <summary>Reject SubScene/Scene/other person-preset folders when browsing Appearance.</summary>
+        internal static bool IsForbiddenInAppearanceCategory(string checkPath)
+        {
+            if (string.IsNullOrEmpty(checkPath)) return true;
+            string p = GalleryNormalizePathSlashes(checkPath);
+            int sep = p.IndexOf(":/", StringComparison.Ordinal);
+            if (sep >= 0 && sep + 2 < p.Length)
+                p = p.Substring(sep + 2);
+
+            if (p.IndexOf("/SubScene/", StringComparison.OrdinalIgnoreCase) >= 0
+                || p.StartsWith("Custom/SubScene", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (p.StartsWith("Saves/scene", StringComparison.OrdinalIgnoreCase)
+                || p.IndexOf("/Saves/scene/", StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+            // Other Person preset folders must not pollute Appearance when ext is json|vap.
+            if (p.StartsWith("Custom/Atom/Person/", StringComparison.OrdinalIgnoreCase)
+                && !p.StartsWith("Custom/Atom/Person/Appearance", StringComparison.OrdinalIgnoreCase))
+                return true;
+            return false;
+        }
+
         public string CurrentCategoryTitle => currentCategoryTitle;
         public GalleryLayoutMode LayoutMode => layoutMode;
 
@@ -863,7 +912,11 @@ namespace VPB
                         try { rgv.preserveCenterItemIndex = rgv.GetCenterItemIndex(); } catch { }
 
                         bool deferGridRefresh = keepInternalSettingsMode;
-                        if (layoutMode == GalleryLayoutMode.List)
+                        if (IsSettingsPanelOpen() || settingsListViewActive)
+                        {
+                            ApplyInternalSettingsListGridConfig(rgv, deferGridRefresh);
+                        }
+                        else if (layoutMode == GalleryLayoutMode.List)
                         {
                             rgv.SetGridConfig(100f, EffectiveListRowHeightForGallery(), 5f, 5f, 1, deferGridRefresh);
                             rgv.SetAdaptiveConfig(true, 0f, 1, true, deferGridRefresh);
@@ -897,10 +950,16 @@ namespace VPB
         {
             try
             {
-                if (layoutMode != GalleryLayoutMode.Grid) return;
                 if (contentGO == null) return;
                 var rgv = contentGO.GetComponent<RecyclingGridView>();
                 if (rgv == null) return;
+                // Settings owns 1-col list config; never stomp with multi-column while open.
+                if (IsSettingsPanelOpen() || settingsListViewActive)
+                {
+                    ApplyInternalSettingsListGridConfig(rgv, deferRefresh: false);
+                    return;
+                }
+                if (layoutMode != GalleryLayoutMode.Grid) return;
                 int cols = GridColumnCount;
                 rgv.SetGridConfig(100f, GetGridCellConfigHeight(), EffectiveGridSpacingX(), EffectiveGridSpacingY(), cols);
                 rgv.SetAdaptiveConfig(true, 200f, cols, false);
@@ -1141,28 +1200,39 @@ namespace VPB
         }
 
         /// <summary>Rebuild side-tab counts once SQL/index + package scan are ready.</summary>
-        /// <returns>True when category/creator counts were rebuilt (caller should refresh side-tab UI).</returns>
+        /// <returns>True when category/creator/user-tag counts were rebuilt (caller should refresh side-tab UI).</returns>
         private bool EnsureSideTabCountsFreshAfterGridReady(bool force)
         {
             DateTime scanNow = DateTime.MinValue;
             try { scanNow = FileManager.lastPackageRefreshTime; } catch { }
-            bool stale = force
-                || !categoriesCached
-                || !creatorsCached
-                || (scanNow > DateTime.MinValue && scanNow > _lastCategoryCountsScanTime);
-            if (!stale) return false;
+            bool scanAdvanced = scanNow > DateTime.MinValue && scanNow > _lastCategoryCountsScanTime;
+            // Vocabulary may load before cat_mem; counts stay pending until index ready (issue #84).
+            bool userTagCountsPending = !userTagsCached || !_userTagSideTabCountsReady;
+            bool sideMetaStale = force || !categoriesCached || !creatorsCached || scanAdvanced;
+            bool userTagStale = force || userTagCountsPending || scanAdvanced;
+            if (!sideMetaStale && !userTagStale) return false;
 
-            categoriesCached = false;
-            creatorsCached = false;
-            try { InvalidateSharedSideMetaIfPackageScanAdvanced(); } catch { }
-            try { CacheCategoryCounts(); } catch { }
-            try { CacheCreators(); } catch { }
+            if (sideMetaStale)
+            {
+                categoriesCached = false;
+                creatorsCached = false;
+                try { InvalidateSharedSideMetaIfPackageScanAdvanced(); } catch { }
+                try { CacheCategoryCounts(); } catch { }
+                try { CacheCreators(); } catch { }
+            }
+            if (userTagStale)
+            {
+                // Force recount; CacheUserTagsSideTab keeps vocabulary on busy SQLite (#74).
+                userTagsCached = false;
+                try { CacheUserTagsSideTab(); } catch { }
+            }
             try
             {
                 int sc = 0;
                 if (categoryCounts != null) categoryCounts.TryGetValue("Scenes", out sc);
                 LogUtil.Log("[VPB.Gallery] EnsureSideTabCountsFreshAfterGridReady scenes=" + sc
-                    + " cached=" + (categoriesCached ? "1" : "0"));
+                    + " cached=" + (categoriesCached ? "1" : "0")
+                    + " userTagsReady=" + (_userTagSideTabCountsReady ? "1" : "0"));
             }
             catch { }
             return true;
@@ -1364,7 +1434,9 @@ namespace VPB
 
             Dictionary<string, int> counts = new Dictionary<string, int>();
             // Package-only category: creators list must be package creators (not internal-file creators).
-            if (string.Equals(currentExtension, "varpkg", StringComparison.OrdinalIgnoreCase))
+            bool packageOnlyCreators = string.Equals(currentExtension, "varpkg", StringComparison.OrdinalIgnoreCase)
+                || VpbLocalDatabase.IsGalleryAllVarPseudoCategory(currentCategoryTitle);
+            if (packageOnlyCreators)
             {
                 if (!VpbLocalDatabase.TryReadVarPackageCreatorCounts(counts, currentPackagePathFilter))
                 {
@@ -1385,8 +1457,15 @@ namespace VPB
             {
                 string[] extensions = string.IsNullOrEmpty(currentExtension) ? new string[0] : currentExtension.Split('|');
                 HashSet<string> targetExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var e in extensions) if (!string.IsNullOrEmpty(e)) targetExts.Add(e.Trim());
-                bool everythingExtForCreators = Gallery.IsEverythingCategoryExtension(currentExtension);
+                foreach (var e in extensions)
+                {
+                    if (string.IsNullOrEmpty(e)) continue;
+                    string et = e.Trim();
+                    if (et.Length == 0 || Gallery.IsGalleryPseudoExtensionToken(et)) continue;
+                    targetExts.Add(et);
+                }
+                bool everythingExtForCreators = Gallery.IsEverythingCategoryExtension(currentExtension)
+                    || Gallery.IsEverythingCategoryName(currentCategoryTitle);
 
                 foreach (var pkg in FileManager.PackagesByUid.Values)
                 {
@@ -1408,21 +1487,25 @@ namespace VPB
                         if (everythingExtForCreators && Gallery.IsEverythingExcludedPreviewExtension(ext)) continue;
                         if (!everythingExtForCreators && !targetExts.Contains(ext)) continue;
 
-                        bool match = false;
-                        if (currentPaths != null && currentPaths.Count > 0)
+                        // EVERYTHING: match all non-preview internals (category.paths are loose-disk roots only).
+                        bool match = everythingExtForCreators;
+                        if (!match)
                         {
-                            for (int k = 0; k < currentPaths.Count; k++)
+                            if (currentPaths != null && currentPaths.Count > 0)
                             {
-                                if (GalleryInternalPathStartsWithPrefix(internalPath, currentPaths[k])) { match = true; break; }
+                                for (int k = 0; k < currentPaths.Count; k++)
+                                {
+                                    if (GalleryInternalPathStartsWithPrefix(internalPath, currentPaths[k])) { match = true; break; }
+                                }
                             }
-                        }
-                        else if (!string.IsNullOrEmpty(currentPath))
-                        {
-                            if (GalleryInternalPathStartsWithPrefix(internalPath, currentPath)) match = true;
-                        }
-                        else
-                        {
-                            match = true;
+                            else if (!string.IsNullOrEmpty(currentPath))
+                            {
+                                if (GalleryInternalPathStartsWithPrefix(internalPath, currentPath)) match = true;
+                            }
+                            else
+                            {
+                                match = true;
+                            }
                         }
 
                         if (match)
@@ -1760,19 +1843,21 @@ namespace VPB
 
         private void CacheUserTagsSideTab()
         {
-            cachedUserTagSideTab.Clear();
-            _userTagSideTabCountsReady = false;
-            _userTagAnyAssignmentExists = false;
             string cat = currentCategoryTitle ?? "";
             if (titleText != null && string.IsNullOrEmpty(cat)) cat = titleText.text ?? "";
 
             var allNames = new List<string>(128);
+            // SQLite can be briefly busy during scene load / package refresh. Do not clear a good
+            // cache or mark empty-as-cached — that empties the Tags panel until F↔T (issue #74).
             if (!VpbLocalDatabase.TryReadAllGalleryUserTagNames(allNames))
             {
-                userTagsCached = true;
-                unchecked { userTagSideTabDataRevision++; }
+                _userTagSideTabCountsReady = false;
                 return;
             }
+
+            cachedUserTagSideTab.Clear();
+            _userTagSideTabCountsReady = false;
+            _userTagAnyAssignmentExists = false;
 
             bool anyAssignOk = VpbLocalDatabase.TryHasAnyGalleryUserTagAssignment(out bool anyExists);
             if (anyAssignOk) _userTagAnyAssignmentExists = anyExists;
@@ -1789,8 +1874,9 @@ namespace VPB
                 if (countsOk) dict.TryGetValue(name, out c);
                 cachedUserTagSideTab.Add(new UserTagSideTabEntry { Name = name, Count = c });
             }
-            // Stick cache after vocabulary load so empty category / failed counts do not re-query every refresh.
-            // Hide-unused waits on counts-ready separately.
+            // Stick vocabulary after name load so empty category / failed counts do not re-query every refresh.
+            // Amounts stay Count=0 until _userTagSideTabCountsReady; EnsureSideTabCountsFreshAfterGridReady
+            // retries when cat_mem index becomes ready (issue #84). Hide-unused waits on counts-ready.
             userTagsCached = true;
             _userTagSideTabCountsReady = countsOk;
             unchecked { userTagSideTabDataRevision++; }
@@ -3437,15 +3523,29 @@ namespace VPB
             categories = cats;
             categoriesCached = false;
 
-            // Try to restore last tab if currentPath is not yet set (e.g. freshly created panels
-            // that were not yet shown via Show()). Panels that already have a category displayed
-            // are left unchanged.
+            // Cold start: settings Initial (or LastUsed → disk). In-session recreate: LastGalleryCategory.
+            // Do not prime Last* on cold start when Initial is Scenes — that overwrote launch settings.
             string lastPageName = null;
-            if (VPBConfig.Instance != null && !string.IsNullOrEmpty(VPBConfig.Instance.LastGalleryCategory))
-                lastPageName = VPBConfig.Instance.LastGalleryCategory;
-            else if (Settings.Instance != null && Settings.Instance.LastGalleryPage != null)
-                lastPageName = Settings.Instance.LastGalleryPage.Value;
-            LogUtil.Log("[Gallery] SetCategories: currentPath='" + currentPath + "' memoryLastCat='" + (VPBConfig.Instance != null ? VPBConfig.Instance.LastGalleryCategory : "null") + "' resolvedLastPage='" + (lastPageName ?? "null") + "'");
+            if (Gallery.SessionBrowseMemoryActive)
+            {
+                if (VPBConfig.Instance != null && !string.IsNullOrEmpty(VPBConfig.Instance.LastGalleryCategory))
+                    lastPageName = VPBConfig.Instance.LastGalleryCategory;
+                else if (Settings.Instance != null && Settings.Instance.LastGalleryPage != null)
+                    lastPageName = Settings.Instance.LastGalleryPage.Value;
+            }
+            else if (VPBConfig.Instance != null)
+            {
+                string initial = VPBConfig.Instance.ResolveInitialGalleryCategoryName();
+                if (!string.IsNullOrEmpty(initial))
+                    lastPageName = initial;
+                else if (!string.IsNullOrEmpty(VPBConfig.Instance.LastGalleryCategory))
+                    lastPageName = VPBConfig.Instance.LastGalleryCategory;
+                else
+                {
+                    try { lastPageName = VPBConfig.ReadLastGalleryCategoryFromDisk(); } catch { lastPageName = null; }
+                }
+            }
+            LogUtil.Log("[Gallery] SetCategories: currentPath='" + currentPath + "' memoryLastCat='" + (VPBConfig.Instance != null ? VPBConfig.Instance.LastGalleryCategory : "null") + "' resolvedLastPage='" + (lastPageName ?? "null") + "' sessionMem=" + (Gallery.SessionBrowseMemoryActive ? "1" : "0"));
 
             if (string.IsNullOrEmpty(currentPath) && !string.IsNullOrEmpty(lastPageName))
             {
@@ -3507,17 +3607,27 @@ namespace VPB
 
         public void PushUndo(Action action)
         {
+            PushUndo(action, null);
+        }
+
+        public void PushUndo(Action action, string label)
+        {
             if (action == null) return;
             undoStack.Push(action);
+            if (undoLabelStack == null) undoLabelStack = new Stack<string>();
+            undoLabelStack.Push(string.IsNullOrEmpty(label)
+                ? VPBTranslation.T("gallery.undo.default_label", "Change")
+                : label);
             if (!isApplyingUndoRedo)
             {
                 try { redoStack.Clear(); } catch { }
+                try { if (redoLabelStack != null) redoLabelStack.Clear(); } catch { }
             }
             TrimUndoRedoStacks();
             UpdateUndoRedoButtonLabels();
         }
 
-        private const int MaxUndoRedoHistory = 6;
+        private const int MaxUndoRedoHistory = 24;
 
         private static void TrimStackToMax<T>(ref Stack<T> stack, int max)
         {
@@ -3538,6 +3648,47 @@ namespace VPB
         {
             TrimStackToMax(ref undoStack, MaxUndoRedoHistory);
             TrimStackToMax(ref redoStack, MaxUndoRedoHistory);
+            TrimStackToMax(ref undoLabelStack, MaxUndoRedoHistory);
+            TrimStackToMax(ref redoLabelStack, MaxUndoRedoHistory);
+            // Keep label stacks aligned if trim drifted (defensive).
+            while (undoLabelStack != null && undoStack != null && undoLabelStack.Count > undoStack.Count)
+                undoLabelStack.Pop();
+            while (redoLabelStack != null && redoStack != null && redoLabelStack.Count > redoStack.Count)
+                redoLabelStack.Pop();
+        }
+
+        private string PeekUndoLabel()
+        {
+            if (undoLabelStack == null || undoLabelStack.Count == 0)
+                return VPBTranslation.T("gallery.undo.default_label", "Change");
+            return undoLabelStack.Peek();
+        }
+
+        private string PeekRedoLabel()
+        {
+            if (redoLabelStack == null || redoLabelStack.Count == 0)
+                return VPBTranslation.T("gallery.undo.default_label", "Change");
+            return redoLabelStack.Peek();
+        }
+
+        private string BuildUndoTooltip()
+        {
+            int n = undoStack != null ? undoStack.Count : 0;
+            if (n <= 0)
+                return VPBTranslation.T("gallery.tooltip.undo_empty", "Nothing to undo (Ctrl+Z)");
+            return string.Format(
+                VPBTranslation.T("gallery.tooltip.undo_next", "Undo: {0} (Ctrl+Z)"),
+                PeekUndoLabel());
+        }
+
+        private string BuildRedoTooltip()
+        {
+            int n = redoStack != null ? redoStack.Count : 0;
+            if (n <= 0)
+                return VPBTranslation.T("gallery.tooltip.redo_empty", "Nothing to redo (Ctrl+Y)");
+            return string.Format(
+                VPBTranslation.T("gallery.tooltip.redo_next", "Redo: {0} (Ctrl+Y / Ctrl+Shift+Z)"),
+                PeekRedoLabel());
         }
 
         private void UpdateUndoRedoButtonLabels()
@@ -3587,6 +3738,23 @@ namespace VPB
             return a;
         }
 
+        /// <summary>
+        /// Push appearance-capable undo for a person atom (morphs/skin/clothing/hair/scale).
+        /// Cold path — selective storable GetJSON, not full Atom.Store (Store stalls large persons).
+        /// </summary>
+        public void PushUndoAtomSnapshot(Atom atom)
+        {
+            try
+            {
+                Action undoAction = CaptureAtomSnapshotAction(atom);
+                if (undoAction != null) PushUndo(undoAction);
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogError("[VPB] PushUndoAtomSnapshot: " + ex.Message);
+            }
+        }
+
         private Action CaptureAtomSnapshotAction(Atom atom)
         {
             if (atom == null) return null;
@@ -3598,16 +3766,30 @@ namespace VPB
                 ClothingLoadingUtils.CaptureClothingHairUndoState(atom);
             List<JSONClass> additionalStorableSnapshots = new List<JSONClass>();
 
+            // Full Atom.Store was correct but multi-second on clothed persons (and Serialize of the
+            // dump). Selective GetJSON is enough for Undo of appearance/skin/morphs: morph banks live
+            // on geometry (must include — old code skipped it and Undo left morphs stuck).
+            // rescaleObject holds person height/scale — without it Undo keeps post-import scale.
             bool ShouldSnapshotAdditionalStorableId(string sid)
             {
                 if (string.IsNullOrEmpty(sid)) return false;
-                if (ClothingLoadingUtils.ClothingHairUndoStateContainsStorable(clothingHairSnapshot, sid)) return false;
-                if (string.Equals(sid, "geometry", StringComparison.OrdinalIgnoreCase)) return false;
+                if (ClothingLoadingUtils.ClothingHairUndoStateContainsStorable(clothingHairSnapshot, sid))
+                    return false;
+                // Pose/plugins/physics undo is out of scope for this light snapshot.
+                if (string.Equals(sid, "PosePresets", StringComparison.OrdinalIgnoreCase)) return false;
+                if (string.Equals(sid, "PluginPresets", StringComparison.OrdinalIgnoreCase)) return false;
+                if (string.Equals(sid, "PluginManager", StringComparison.OrdinalIgnoreCase)) return false;
+                if (string.Equals(sid, "control", StringComparison.OrdinalIgnoreCase)) return false;
+                if (sid.IndexOf("Physics", StringComparison.OrdinalIgnoreCase) >= 0) return false;
+                if (sid.IndexOf("AutoCollider", StringComparison.OrdinalIgnoreCase) >= 0) return false;
+                if (string.Equals(sid, "geometry", StringComparison.OrdinalIgnoreCase)) return true;
+                if (string.Equals(sid, "rescaleObject", StringComparison.OrdinalIgnoreCase)) return true;
                 if (string.Equals(sid, "Skin", StringComparison.OrdinalIgnoreCase)) return true;
-                if (sid.EndsWith("Presets", StringComparison.OrdinalIgnoreCase)) return true;
-                if (sid.EndsWith("Preset", StringComparison.OrdinalIgnoreCase)) return true;
+                if (sid.IndexOf("skin", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+                if (sid.IndexOf("texture", StringComparison.OrdinalIgnoreCase) >= 0) return true;
                 if (sid.IndexOf("appearance", StringComparison.OrdinalIgnoreCase) >= 0) return true;
                 if (sid.IndexOf("morph", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+                // Preset-manager shells alone do not hold morph/skin values; skip *Presets noise.
                 return false;
             }
 
@@ -3627,7 +3809,20 @@ namespace VPB
                         if (s == null) continue;
                         JSONClass snap = null;
                         try { snap = s.GetJSON(); } catch { snap = null; }
-                        if (snap != null) additionalStorableSnapshots.Add(snap);
+                        if (snap == null) continue;
+                        // Freeze copy — GetJSON can share nodes that mutate after import.
+                        try
+                        {
+                            string frozen = VPB.src.util.JsonSerializationUtil.Serialize(snap, 1 << 18);
+                            if (!string.IsNullOrEmpty(frozen))
+                            {
+                                JSONNode parsed = JSON.Parse(frozen);
+                                if (parsed != null && parsed.AsObject != null)
+                                    snap = parsed.AsObject;
+                            }
+                        }
+                        catch { }
+                        additionalStorableSnapshots.Add(snap);
                     }
                 }
             }
@@ -3636,11 +3831,18 @@ namespace VPB
             return () =>
             {
                 Atom targetAtom = null;
-                try { targetAtom = SuperController.singleton != null ? SuperController.singleton.GetAtomByUid(atomUid) : null; } catch { targetAtom = null; }
+                try
+                {
+                    targetAtom = SuperController.singleton != null
+                        ? SuperController.singleton.GetAtomByUid(atomUid)
+                        : null;
+                }
+                catch { targetAtom = null; }
                 if (targetAtom == null) return;
 
-                try { ClothingLoadingUtils.RestoreClothingHairUndoState(targetAtom, clothingHairSnapshot); } catch { }
-
+                // Geometry/skin/morphs first, then clothing/hair (toggles + item materials win last).
+                // rescaleObject restored after those so Undo returns pre-import height/scale.
+                JSONClass rescaleSnap = null;
                 try
                 {
                     for (int i = 0; i < additionalStorableSnapshots.Count; i++)
@@ -3651,6 +3853,11 @@ namespace VPB
                         try { sid = snap["id"].Value; } catch { sid = null; }
                         if (string.IsNullOrEmpty(sid)) continue;
                         if (!ShouldSnapshotAdditionalStorableId(sid)) continue;
+                        if (string.Equals(sid, "rescaleObject", StringComparison.OrdinalIgnoreCase))
+                        {
+                            rescaleSnap = snap;
+                            continue;
+                        }
                         JSONStorable s = null;
                         try { s = targetAtom.GetStorableByID(sid); } catch { s = null; }
                         if (s == null) continue;
@@ -3658,6 +3865,19 @@ namespace VPB
                     }
                 }
                 catch { }
+
+                try { ClothingLoadingUtils.RestoreClothingHairUndoState(targetAtom, clothingHairSnapshot); }
+                catch { }
+
+                if (rescaleSnap != null)
+                {
+                    try
+                    {
+                        JSONStorable rs = targetAtom.GetStorableByID("rescaleObject");
+                        if (rs != null) rs.RestoreFromJSON(rescaleSnap);
+                    }
+                    catch { }
+                }
             };
         }
 
@@ -3932,6 +4152,8 @@ namespace VPB
                     UpdateTabs();
             }
             catch { }
+            // Scene load can leave Tags rail sticky Mask collapsed while Tag Mode stays armed (#74).
+            try { RequestUserTagAvailVirtRecoverAfterLayout(); } catch { }
         }
 
         public void CycleTarget(bool forward)
@@ -3996,16 +4218,31 @@ namespace VPB
             if (undoStack.Count > 0)
             {
                 Action action = undoStack.Pop();
+                string undoneLabel = VPBTranslation.T("gallery.undo.default_label", "Change");
+                if (undoLabelStack != null && undoLabelStack.Count > 0)
+                    undoneLabel = undoLabelStack.Pop();
                 try
                 {
                     Action redoAction = CaptureUndoRedoSnapshotAction();
-                    if (redoAction != null) redoStack.Push(redoAction);
+                    if (redoAction != null)
+                    {
+                        redoStack.Push(redoAction);
+                        if (redoLabelStack == null) redoLabelStack = new Stack<string>();
+                        redoLabelStack.Push(undoneLabel);
+                    }
                     isApplyingUndoRedo = true;
                     action?.Invoke();
                 }
                 catch (Exception ex)
                 {
                     LogUtil.LogError("Error during Undo: " + ex.Message);
+                    try
+                    {
+                        ShowTemporaryStatus(
+                            VPBTranslation.T("gallery.undo.failed", "Undo failed. See log."),
+                            2.5f);
+                    }
+                    catch { }
                 }
                 finally
                 {
@@ -4014,6 +4251,15 @@ namespace VPB
 
                 TrimUndoRedoStacks();
                 UpdateUndoRedoButtonLabels();
+                try
+                {
+                    ShowTemporaryStatus(
+                        string.Format(
+                            VPBTranslation.T("gallery.undo.done", "Undid: {0}"),
+                            undoneLabel),
+                        1.5f);
+                }
+                catch { }
                 try
                 {
                     // Ensure context submenus refresh immediately after Undo restores items.
@@ -4027,7 +4273,13 @@ namespace VPB
             }
             else
             {
-                LogUtil.Log("[VPB] Undo: stack empty");
+                try
+                {
+                    ShowTemporaryStatus(
+                        VPBTranslation.T("gallery.undo.empty", "Nothing to undo."),
+                        1.5f);
+                }
+                catch { }
                 UpdateUndoRedoButtonLabels();
             }
         }
@@ -4037,16 +4289,31 @@ namespace VPB
             if (redoStack.Count > 0)
             {
                 Action action = redoStack.Pop();
+                string redoneLabel = VPBTranslation.T("gallery.undo.default_label", "Change");
+                if (redoLabelStack != null && redoLabelStack.Count > 0)
+                    redoneLabel = redoLabelStack.Pop();
                 try
                 {
                     Action undoAction = CaptureUndoRedoSnapshotAction();
-                    if (undoAction != null) undoStack.Push(undoAction);
+                    if (undoAction != null)
+                    {
+                        undoStack.Push(undoAction);
+                        if (undoLabelStack == null) undoLabelStack = new Stack<string>();
+                        undoLabelStack.Push(redoneLabel);
+                    }
                     isApplyingUndoRedo = true;
                     action?.Invoke();
                 }
                 catch (Exception ex)
                 {
                     LogUtil.LogError("Error during Redo: " + ex.Message);
+                    try
+                    {
+                        ShowTemporaryStatus(
+                            VPBTranslation.T("gallery.redo.failed", "Redo failed. See log."),
+                            2.5f);
+                    }
+                    catch { }
                 }
                 finally
                 {
@@ -4055,6 +4322,15 @@ namespace VPB
 
                 TrimUndoRedoStacks();
                 UpdateUndoRedoButtonLabels();
+                try
+                {
+                    ShowTemporaryStatus(
+                        string.Format(
+                            VPBTranslation.T("gallery.redo.done", "Redid: {0}"),
+                            redoneLabel),
+                        1.5f);
+                }
+                catch { }
                 try
                 {
                     Atom tgt = null;
@@ -4067,7 +4343,13 @@ namespace VPB
             }
             else
             {
-                LogUtil.Log("[VPB] Redo: stack empty");
+                try
+                {
+                    ShowTemporaryStatus(
+                        VPBTranslation.T("gallery.redo.empty", "Nothing to redo."),
+                        1.5f);
+                }
+                catch { }
                 UpdateUndoRedoButtonLabels();
             }
         }

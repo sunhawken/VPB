@@ -95,9 +95,11 @@ namespace VPB
 
             FileEntry sceneFile = pool[UnityEngine.Random.Range(0, pool.Count)];
 
-            // LoadSourceScene is synchronous: populates importSidebarSourcePersonIds + importSidebarLoadedSceneJSON.
+            // LoadSourceScene is async for full JSON; wait so person ids + scene JSON are ready.
             try { LoadSourceScene(sceneFile); }
             catch (Exception ex) { LogUtil.LogWarning("[VPB] Random Scene Import: LoadSourceScene failed: " + ex.Message); }
+
+            yield return WaitForImportSourceSceneReady(30f);
 
             // Restore view before any heavier work so the UI doesn't stay on Scenes.
             if (navigated && !string.IsNullOrEmpty(prevTitle))
@@ -467,6 +469,18 @@ namespace VPB
             catch { }
         }
 
+        /// <summary>Toggle Creator Mode (same as side-rail / Ctrl+Shift+K).</summary>
+        internal void QuickMenu_ToggleCreatorMode()
+        {
+            try { ToggleCreatorMode(); } catch { }
+        }
+
+        /// <summary>Open Strip Scene keep selector (enters Creator Mode if needed).</summary>
+        internal void QuickMenu_OpenStripScene()
+        {
+            try { OpenSceneStripKeepSelector(); } catch { }
+        }
+
         /// <summary>Open Cleanup mode using the same entry point as the toolbox Cleanup action.</summary>
         internal void QuickMenu_OpenCleanupMode()
         {
@@ -484,16 +498,16 @@ namespace VPB
             catch { }
         }
 
-        /// <summary>Toggle the ★ rated-only filter (same as clicking the star button in the gallery title bar).</summary>
+        /// <summary>Cycle the ★ presence filter (Rated only → Not rated → Off). Same as title-bar ★.</summary>
         internal void QuickMenu_ToggleStarFilter()
         {
             try { ToggleRatingSort(); } catch { }
         }
 
-        /// <summary>Returns true if the ★ rated-only filter is currently active.</summary>
+        /// <summary>True when ★ presence filter is armed (rated or not-rated).</summary>
         internal bool QuickMenu_IsStarFilterEnabled()
         {
-            try { return isRatingSortToggleEnabled; } catch { return false; }
+            try { return HasRatingPresenceFilter(); } catch { return false; }
         }
     }
 }

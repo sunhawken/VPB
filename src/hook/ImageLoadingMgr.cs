@@ -302,16 +302,16 @@ namespace VPB
                     if (payload.Data != null && payload.Data.Length > MaxSyncDecompressedPayloadBytes)
                         return false;
 
-                    bool isSimTexture = payload.Meta.IsReadable || SuperControllerHook.IsSimulationTexturePath(qi.imgPath);
+                    bool forceReadable = ShouldForceCpuReadable(qi, payload.Meta.IsReadable);
                     Texture2D tex = qi.tex;
                     if (tex == null)
                     {
                         tex = TextureUtil.CreateTextureFromCachedRaw(payload.Data, payload.Meta.Width, payload.Meta.Height, payload.Meta.Format,
-                            payload.Meta.CreateMipMaps, qi.linear, !isSimTexture, isSimTexture);
+                            payload.Meta.CreateMipMaps, qi.linear, !forceReadable, forceReadable);
                         if (tex == null) return false;
                     }
                     else if (!TextureUtil.ApplyCachedRawToTexture(tex, payload.Data, payload.Meta.Width, payload.Meta.Height, payload.Meta.Format,
-                        payload.Meta.CreateMipMaps, qi.linear, !isSimTexture, isSimTexture))
+                        payload.Meta.CreateMipMaps, qi.linear, !forceReadable, forceReadable))
                     {
                         return false;
                     }
@@ -329,7 +329,8 @@ namespace VPB
             }
 
             ImageLoaderThreaded.QueuedImage cand = FindCandidateByPath(qi.imgPath);
-            if (cand != null && cand.tex != null && GetTextureCacheKey(cand) == cacheKey)
+            if (cand != null && cand.tex != null && GetTextureCacheKey(cand) == cacheKey
+                && TextureMeetsCpuReadableRequirement(qi, cand.tex))
             {
                 qi.tex = cand.tex;
                 RegisterTexture(cacheKey, cand.tex);
@@ -352,7 +353,8 @@ namespace VPB
             if (allowCandidateTexture)
             {
                 ImageLoaderThreaded.QueuedImage cand = FindCandidateByPath(qi.imgPath);
-                if (cand != null && cand.tex != null && GetTextureCacheKey(cand) == cacheKey)
+                if (cand != null && cand.tex != null && GetTextureCacheKey(cand) == cacheKey
+                    && TextureMeetsCpuReadableRequirement(qi, cand.tex))
                 {
                     qi.tex = cand.tex;
                     RegisterTexture(cacheKey, cand.tex);
@@ -952,17 +954,19 @@ namespace VPB
             DiskCachePayload payload;
             if (!TryLoadDiskCachePayload(qi, true, false, true, out payload)) return false;
 
-            bool isSim = payload.Meta.IsReadable || SuperControllerHook.IsSimulationTexturePath(qi.imgPath);
+            bool forceReadable = ShouldForceCpuReadable(qi, payload.Meta.IsReadable);
+            // Caller may request non-readable GPU texture; never override character/sim CPU-read needs.
+            bool markNonReadableEffective = markNonReadable && !forceReadable;
             bool createMipMaps = payload.Meta.CreateMipMaps;
             if (!TextureUtil.ApplyCachedRawToTexture(tex, payload.Data, payload.Meta.Width, payload.Meta.Height, payload.Meta.Format,
-                createMipMaps, qi.linear, markNonReadable, isSim))
+                createMipMaps, qi.linear, markNonReadableEffective, forceReadable))
             {
                 return false;
             }
 
-            if (SuperControllerHook.IsSimulationTexturePath(qi.imgPath))
+            if (forceReadable)
             {
-                LogUtil.Log("[VPB SIM] ImageLoadingMgr applied READABLE sim texture from cache: " + qi.imgPath);
+                LogUtil.Log("[VPB] ImageLoadingMgr applied CPU-readable texture from cache: " + qi.imgPath);
             }
 
             return true;
@@ -1209,18 +1213,47 @@ namespace VPB
 
 
         WaitForEndOfFrame waitForEndOfFrame = new WaitForEndOfFrame();
+
+        /// <summary>
+        /// MaterialOptions custom slots need OnTexture*Loaded ASAP after URL sync so GPU bind
+        /// races less with skin-wrap/cloth material reconnect (issue #80). Still wait out real scene loads.
+        /// </summary>
+        static bool IsMaterialOptionsCustomCallback(ImageLoaderThreaded.QueuedImage qi)
+        {
+            if (qi == null || qi.callback == null) return false;
+            try
+            {
+                var m = qi.callback.Method;
+                if (m == null) return false;
+                string mName = m.Name ?? "";
+                if (!mName.StartsWith("OnTexture", StringComparison.Ordinal)) return false;
+                Type t = m.DeclaringType;
+                if (t == null) return false;
+                return typeof(MaterialOptions).IsAssignableFrom(t);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         IEnumerator DelayDoCallback(ImageLoaderThreaded.QueuedImage qi)
         {
             while (LogUtil.IsSceneLoading() || LogUtil.IsSceneLoadActive())
                 yield return null;
             yield return waitForEndOfFrame;
-            yield return waitForEndOfFrame;
+            // MaterialOptions: one EOF is enough outside scene load; second EOF widens the
+            // window where late material reconnect can overwrite the custom slot with defaults.
+            if (!IsMaterialOptionsCustomCallback(qi))
+                yield return waitForEndOfFrame;
             DoCallback(qi);
         }
 
         public bool RequestImmediate(ImageLoaderThreaded.QueuedImage qi)
         {
             if (qi == null || string.IsNullOrEmpty(qi.imgPath) || qi.imgPath == "NULL") return false;
+            // Match VaM ImageLoaderThreaded: forceReload must reprocess, not serve VPB RAM/disk hit.
+            if (qi.forceReload) return false;
             if (Settings.Instance == null || Settings.Instance.ThumbnailThreshold == null) return false;
 
             int threshold = Settings.Instance.ThumbnailThreshold.Value;
@@ -1232,7 +1265,7 @@ namespace VPB
             if (qi.tex == null)
             {
                 var cached = GetTextureFromCache(cacheKey);
-                if (cached != null)
+                if (cached != null && TextureMeetsCpuReadableRequirement(qi, cached))
                 {
                     qi.tex = cached;
                     return true;
@@ -1250,16 +1283,16 @@ namespace VPB
                     if (payload.Data != null && payload.Data.Length > MaxSyncDecompressedPayloadBytes)
                         return false;
 
-                    bool isSimTexture = payload.Meta.IsReadable || SuperControllerHook.IsSimulationTexturePath(qi.imgPath);
+                    bool forceReadable = ShouldForceCpuReadable(qi, payload.Meta.IsReadable);
                     Texture2D tex = qi.tex;
                     if (tex == null)
                     {
                         tex = TextureUtil.CreateTextureFromCachedRaw(payload.Data, payload.Meta.Width, payload.Meta.Height, payload.Meta.Format,
-                            payload.Meta.CreateMipMaps, qi.linear, !isSimTexture, isSimTexture);
+                            payload.Meta.CreateMipMaps, qi.linear, !forceReadable, forceReadable);
                         if (tex == null) return false;
                     }
                     else if (!TextureUtil.ApplyCachedRawToTexture(tex, payload.Data, payload.Meta.Width, payload.Meta.Height, payload.Meta.Format,
-                        payload.Meta.CreateMipMaps, qi.linear, !isSimTexture, isSimTexture))
+                        payload.Meta.CreateMipMaps, qi.linear, !forceReadable, forceReadable))
                     {
                         return false;
                     }
@@ -1286,6 +1319,26 @@ namespace VPB
             
             LogUtil.MarkImageActivity();
 
+            // VaM JSONStorableUrl.Reload / browse sets forceReload. Native UseCachedTex still
+            // reprocesses; VPB must not short-circuit to a silent RAM/disk hit (issue #80).
+            if (qi.forceReload)
+            {
+                try
+                {
+                    string evictKey = GetTextureCacheKey(qi);
+                    if (!string.IsNullOrEmpty(evictKey))
+                    {
+                        TextureUtil.UnmarkDownscaledActive(GetDownscaledKey(evictKey));
+                        lock (textureCacheLock)
+                        {
+                            textureCache.Remove(evictKey);
+                        }
+                    }
+                }
+                catch { }
+                return false;
+            }
+
             if (Settings.Instance == null || Settings.Instance.ThumbnailThreshold == null) return false;
 
             int threshold = Settings.Instance.ThumbnailThreshold.Value;
@@ -1295,7 +1348,7 @@ namespace VPB
             string cacheKey = GetTextureCacheKey(qi);
             
             var cacheTexture = GetTextureFromCache(cacheKey);
-            if (cacheTexture != null)
+            if (cacheTexture != null && TextureMeetsCpuReadableRequirement(qi, cacheTexture))
             {
                 qi.tex = cacheTexture;
                 if (Messager.singleton != null)
@@ -1307,6 +1360,19 @@ namespace VPB
                     DoCallback(qi);
                 }
                 return true;
+            }
+            // Stale non-readable RAM entry (pre-fix character/sim serve): drop and rebuild readable.
+            if (cacheTexture != null)
+            {
+                try
+                {
+                    TextureUtil.UnmarkDownscaledActive(GetDownscaledKey(cacheKey));
+                    lock (textureCacheLock)
+                    {
+                        textureCache.Remove(cacheKey);
+                    }
+                }
+                catch { }
             }
 
             if (TryServeFromMemoryCache(qi, cacheKey, true))
@@ -1528,11 +1594,14 @@ namespace VPB
             {
                 string path = data.OriginalQI.imgPath ?? "";
                 bool isSimTexturePath = SuperControllerHook.IsSimulationTexturePath(path);
-                bool isSimTexture = data.Meta.IsReadable || isSimTexturePath;
+                bool isCharacterTex = SuperControllerHook.IsCharacterTextureQueuedImage(data.OriginalQI);
+                bool forceReadable = ShouldForceCpuReadable(data.OriginalQI, data.Meta.IsReadable);
                 
-                if (isSimTexturePath || data.Meta.IsReadable)
+                if (isSimTexturePath || isCharacterTex || data.Meta.IsReadable)
                 {
-                    LogUtil.Log($"[VPB SIM] CreateTexture: path='{path}', isSimPath={isSimTexturePath}, metaIsReadable={data.Meta.IsReadable}, finalIsSim={isSimTexture}");
+                    LogUtil.Log("[VPB] CreateTexture readable: path='" + path + "', sim=" + isSimTexturePath
+                        + ", char=" + isCharacterTex + ", metaIsReadable=" + data.Meta.IsReadable
+                        + ", forceReadable=" + forceReadable);
                 }
 
                 if (!IsCacheMetaAndPayloadSane(data.Meta, data.Data))
@@ -1551,16 +1620,16 @@ namespace VPB
                     createMipMaps = ResolveQueueCreateMipMaps(data.OriginalQI);
 
                 Texture2D tex = TextureUtil.CreateTextureFromCachedRaw(data.Data, data.Meta.Width, data.Meta.Height, data.Meta.Format,
-                    createMipMaps, data.OriginalQI.linear, !isSimTexture, isSimTexture);
+                    createMipMaps, data.OriginalQI.linear, !forceReadable, forceReadable);
                 if (tex == null)
                 {
                     EnqueueVaMImageLoadOnMainThread(data.OriginalQI);
                     return;
                 }
 
-                if (isSimTexture)
+                if (forceReadable)
                 {
-                    LogUtil.Log($"[VPB SIM] Created READABLE sim texture from cache: {path}");
+                    LogUtil.Log("[VPB] Created CPU-readable texture from cache: " + path);
                 }
 
                 data.OriginalQI.tex = tex;
@@ -2583,6 +2652,23 @@ namespace VPB
             {
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Match native ImageLoaderThreaded: character skin stays CPU-readable so
+        /// DAZCharacterTextureControl.BlendGenitalTexture GetPixels can run after torso load.
+        /// </summary>
+        private static bool ShouldForceCpuReadable(ImageLoaderThreaded.QueuedImage qi, bool metaIsReadable)
+        {
+            if (metaIsReadable) return true;
+            return SuperControllerHook.NeedsCpuReadableTexture(qi);
+        }
+
+        private static bool TextureMeetsCpuReadableRequirement(ImageLoaderThreaded.QueuedImage qi, Texture2D tex)
+        {
+            if (tex == null) return false;
+            if (!SuperControllerHook.NeedsCpuReadableTexture(qi)) return true;
+            return IsTextureReadableForCacheWrite(tex);
         }
 
         private static bool TryGetTextureBytesForZstdWrite(Texture2D src, bool linear, bool forceReadable, out byte[] raw, out TextureFormat format, out int w, out int h)

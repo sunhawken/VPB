@@ -452,9 +452,11 @@ namespace VPB
             }
 
             GenericTextureHook.PatchAll(m_Harmony);
+            DazCharacterTextureBlendHook.PatchAll(m_Harmony);
             DAZClothingHook.PatchAll(m_Harmony);
             DAZHairSwapHook.PatchAll(m_Harmony);
             VpbPerfHairHook.PatchAll(m_Harmony);
+            VpbCatalogRefreshHook.PatchAll(m_Harmony);
             ThirdPartyFixHook.PatchAll(m_Harmony);
             StateMachineDiagnostic.PatchAll(m_Harmony);
 
@@ -570,11 +572,20 @@ namespace VPB
 
             // Undo snapshots land in Saves/ and only delete when undo runs; wipe leftovers from prior sessions.
             try { SceneLoadingUtils.CleanupOrphanUndoTempFiles(); } catch { }
+            try { SceneLoadingUtils.CleanupOrphanTempSceneFiles(); } catch { }
 
             try
             {
                 if (VPBConfig.Instance != null)
                     VPBConfig.Instance.ConfigChanged += RefreshQuickMenuAssignableTransparency;
+            }
+            catch { }
+
+            // First-run gallery UI scale: retry if Awake Load ran before Screen.height was valid.
+            try
+            {
+                if (VPBConfig.Instance != null)
+                    VPBConfig.Instance.TryEnsureGalleryUiScaleAutoSeeded();
             }
             catch { }
 
@@ -1148,6 +1159,9 @@ namespace VPB
             // Live preview: reposition the quick-menu grid when the anchor setting changes.
             // (Do this every frame; the helper is internally throttled.)
             try { QuickMenuUpdateGridLayoutLive(); } catch { }
+
+            // Assignable-button tip hide grace (instant show; deferred clear only).
+            try { QuickMenuAdvanceTooltipHide(); } catch { }
         }
 
 

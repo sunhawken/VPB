@@ -249,12 +249,13 @@ namespace VPB
             blkBtn.onClick.AddListener(() => SetCategoryQuickMenuVisible(false));
             _categoryQuickBlockerGO.SetActive(false);
 
-            // Keep menu out of titlebar masks/clips.
-            _categoryQuickMenuOuterGO = UI.CreateChildRT(galleryBackgroundGO, "CategoryQuickMenu", AnchorPresets.topLeft, new Vector2(TitleBarCategoryClampMaxRef, 340f), new Vector2(60, CategoryQuickMenuTopOffsetY(1f)));
+            // Keep menu out of titlebar masks/clips. Width matches QuickFilters popup (not title-bar chrome clamp).
+            _categoryQuickMenuOuterGO = UI.CreateChildRT(galleryBackgroundGO, "CategoryQuickMenu", AnchorPresets.topLeft, new Vector2(GalleryUiDesignTokens.PopupMenuPanelWidthRef, 340f), new Vector2(60, CategoryQuickMenuTopOffsetY(1f)));
             var outerRT = _categoryQuickMenuOuterGO.GetComponent<RectTransform>();
 
             _categoryQuickMenuOuterRT = outerRT;
-            var outerImg = AddCategoryQuickRoundedBg(_categoryQuickMenuOuterGO, new Color(UI.PopupBackdrop.r, UI.PopupBackdrop.g, UI.PopupBackdrop.b, 0.92f));
+            // Flat panel (match CreatePopupMenuPanel). Rounding belongs on chrome chip + row buttons only.
+            UI.AddImage(_categoryQuickMenuOuterGO, new Color(UI.PopupBackdrop.r, UI.PopupBackdrop.g, UI.PopupBackdrop.b, 0.92f));
 
             // No child Canvas / overrideSorting / SuperController.AddCanvas. Earlier attempts at all three
             // either left the popup behind gallery rows in VR (overrideSorting unreliable for nested WorldSpace
@@ -349,9 +350,13 @@ namespace VPB
             float leftInset = flushLeft ? 0f : GalleryUiDesignTokens.TitleBarTitleLeftInsetRef * paneScale;
             // Same height as Source/settings chips so label cannot peek above neighbours.
             float catH = GalleryUiDesignTokens.TitleBarChipRef * paneScale;
+            // Prefer labeled width (same as title-bar responsive), not ClampMax — Max made VR
+            // dropdown span resize→filter under smaller panes.
+            float catLabeledW = Mathf.Clamp(TitleBarCategoryPreferredRef * paneScale,
+                TitleBarCategoryClampMinRef * paneScale, TitleBarCategoryClampMaxRef * paneScale);
             float catW = _categoryQuickCompact
                 ? GalleryUiDesignTokens.TitleBarChipRef * paneScale
-                : TitleBarCategoryClampMaxRef * paneScale;
+                : catLabeledW;
             _categoryQuickChromeRootRT.localScale = Vector3.one;
             _categoryQuickChromeRootRT.anchoredPosition = new Vector2(leftInset, 0f);
             _categoryQuickChromeRootRT.sizeDelta = new Vector2(catW, catH);
@@ -362,9 +367,11 @@ namespace VPB
                 _categoryQuickMenuOuterRT.anchoredPosition = new Vector2(
                     leftInset,
                     CategoryQuickMenuTopOffsetY(paneScale));
-                // Menu stays full width even when header is icon-only.
-                _categoryQuickMenuOuterRT.sizeDelta = new Vector2(TitleBarCategoryClampMaxRef * paneScale, 340f * paneScale);
-                SyncCategoryQuickRoundedBg(_categoryQuickMenuOuterGO != null ? _categoryQuickMenuOuterGO.GetComponent<RoundedRect>() : null);
+                // Relaxed list width like QuickFilters; never narrower than labeled chrome.
+                float menuW = Mathf.Max(
+                    GalleryUiDesignTokens.PopupMenuPanelWidthRef * paneScale,
+                    catLabeledW);
+                _categoryQuickMenuOuterRT.sizeDelta = new Vector2(menuW, 340f * paneScale);
             }
             ApplyCategoryQuickArrowChromeLayout(paneScale);
             ApplyCategoryQuickMenuRowsLayout(paneScale);
@@ -426,7 +433,9 @@ namespace VPB
         private void SyncCategoryQuickSwitchChrome()
         {
             if (_categoryQuickChromeRootGO == null) return;
-            bool show = !IsFilterActive && !importSidebarActive;
+            // Keep header category chip while Import sidebar is open: Import replaces the side
+            // Category column, so this dropdown is the remaining primary category nav (and exit path).
+            bool show = !IsFilterActive;
             if (_categoryQuickChromeRootGO.activeSelf != show)
                 _categoryQuickChromeRootGO.SetActive(show);
             if (!show && _categoryQuickMenuOpen)
@@ -531,6 +540,13 @@ namespace VPB
                 {
                     ShowTemporaryStatus(VPBTranslation.T("bench.pick.block_nav",
                         "End Scene Load Test selection first (Done or Cancel)."), 2.5f);
+                    yield break;
+                }
+                if (_stripKeepSubScenePickActive && !StripKeepSubScenePickAllowsShowRequest(name))
+                {
+                    ShowTemporaryStatus(VPBTranslation.T(
+                        "gallery.creator.strip_subscene_pick_block_nav",
+                        "End SubScene pick first (Confirm Pick or Cancel Pick)."), 2.5f);
                     yield break;
                 }
                 if (LogGalleryCategoryTypeSwitchTiming)
@@ -765,6 +781,15 @@ namespace VPB
             btn.transition = Selectable.Transition.None;
             var cap = cat;
             btn.onClick.AddListener(() => ApplyCategoryQuickPick(cap));
+
+            // Match side tabs / tag-category modal rows (CreateUIButton path not used here).
+            try
+            {
+                var hb = row.AddComponent<UIHoverBorder>();
+                hb.inward = true;
+                hb.ApplyBorderSettings();
+            }
+            catch { }
 
             string numPrefix = keyboardDigitLabel >= 0 ? (keyboardDigitLabel == 0 ? "0." : keyboardDigitLabel + ".") : rowLabelNumber + ".";
 

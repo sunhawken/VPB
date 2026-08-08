@@ -134,6 +134,58 @@ namespace VPB
             }
         }
 
+        /// <summary>Yield between RemoveAtom calls — sync wipe of many SubScenes freezes/crashes main thread.</summary>
+        private static System.Collections.IEnumerator RemoveAllSubSceneAtomsCo()
+        {
+            if (SuperController.singleton == null) yield break;
+            List<Atom> toRemove = new List<Atom>();
+            int totalAtoms = 0;
+            try
+            {
+                var all = SuperController.singleton.GetAtoms();
+                if (all != null) totalAtoms = all.Count;
+                foreach (var a in all)
+                {
+                    if (a != null && SceneUtils.IsSubSceneAtom(a))
+                        toRemove.Add(a);
+                }
+            }
+            catch { yield break; }
+
+            if (toRemove.Count <= 0) yield break;
+
+            // Anjbgo-style scenes are built from many SubScenes (.SELECTIONS, .BACKGROUND, …).
+            // Mass RemoveAtom there hard-hangs / crashes (log: crash mid RemoveAtom '.SELECTIONS').
+            const int maxSafeSubSceneWipe = 3;
+            const int maxSafeSceneAtoms = 40;
+            if (toRemove.Count > maxSafeSubSceneWipe || totalAtoms > maxSafeSceneAtoms)
+            {
+                LogUtil.LogWarning("[VPB] Replace mode: SKIP mass SubScene wipe — scene too large"
+                    + " (subScenes=" + toRemove.Count + " atoms=" + totalAtoms
+                    + "). Will add a new SubScene instead. Select a SubScene atom as target to replace one.");
+                yield break;
+            }
+
+            LogUtil.Log($"[VPB] Replace mode: Removing {toRemove.Count} existing SubScenes (yielded, atoms={totalAtoms})");
+            for (int i = 0; i < toRemove.Count; i++)
+            {
+                Atom a = toRemove[i];
+                string uid = a != null ? a.uid : "?";
+                LogUtil.Log($"[VPB] Replace mode: RemoveAtom SubScene {i + 1}/{toRemove.Count} '{uid}' begin");
+                float t0 = Time.realtimeSinceStartup;
+                try { if (a != null) SuperController.singleton.RemoveAtom(a); } catch (Exception ex)
+                {
+                    LogUtil.LogWarning("[VPB] Replace mode: RemoveAtom failed '" + uid + "': " + ex.Message);
+                }
+                LogUtil.Log($"[VPB] Replace mode: RemoveAtom SubScene {i + 1}/{toRemove.Count} '{uid}' done ms="
+                    + ((Time.realtimeSinceStartup - t0) * 1000f).ToString("F0"));
+                yield return null;
+                yield return null;
+                yield return new WaitForEndOfFrame();
+            }
+            LogUtil.Log($"[VPB] Replace mode: SubScene removals done ({toRemove.Count})");
+        }
+
         private System.Collections.IEnumerator LoadSubSceneCoroutine(string path)
         {
             Atom subSceneAtom = TryGetSelectedSubSceneTarget();
@@ -141,7 +193,7 @@ namespace VPB
             if (subSceneAtom == null)
             {
                 if (Panel != null && Panel.DragDropReplaceMode)
-                    RemoveAllSubSceneAtoms();
+                    yield return RemoveAllSubSceneAtomsCo();
 
                 HashSet<string> existingAtoms = new HashSet<string>();
                 foreach (var a in SuperController.singleton.GetAtoms()) existingAtoms.Add(a.uid);
@@ -181,6 +233,8 @@ namespace VPB
 
         private void ApplyClothingToAtom(Atom atom, string path, string appearanceClothingMode = null)
         {
+            // Capture before any yield-deferred work so rapid filter re-dice can abort stale toggles.
+            int applySerial = GalleryPanel.CaptureClothingApplySerial();
             string normalizedPath = UI.NormalizePath(path);
 
             string legacyPath = normalizedPath;
@@ -192,6 +246,14 @@ namespace VPB
 
             ItemType itemType = GetItemType(FileEntry);
             string ext = Path.GetExtension(normalizedPath).ToLowerInvariant();
+
+            // Script plugins must not fall through to clothing/preset toggle (silent no-op).
+            if (itemType == ItemType.Plugins && IsPluginScriptEntry(FileEntry))
+            {
+                ApplyPluginScriptToAtom(atom, FileEntry);
+                return;
+            }
+
             string appearanceMode = appearanceClothingMode;
             if (itemType == ItemType.Appearance && !string.IsNullOrEmpty(appearanceMode))
             {
@@ -267,7 +329,8 @@ namespace VPB
                 itemType == ItemType.HairPreset ||
                 itemType == ItemType.Skin ||
                 itemType == ItemType.Pose ||
-                itemType == ItemType.Morphs;
+                itemType == ItemType.Morphs ||
+                itemType == ItemType.Plugins;
             if (shouldPrewarmOnDemand)
             {
                 try
@@ -275,9 +338,19 @@ namespace VPB
                     SceneLoadingUtils.PrewarmOnDemandPackagesForEntry(FileEntry, normalizedPath);
                     if (ShouldForcePrewarmRefreshBeforeApply(itemType))
                     {
-                        // First-click reliability: if prewarm queued a coalesced refresh, run it now
-                        // before one-shot preset/material lookup work starts.
-                        VamOnDemandLoader.ForceRunPendingCoalescedVamRefresh("pre_apply_prewarm_flush");
+                        // Clothing/hair: try light DAZ catalog rebuild on target first. If the item
+                        // param already exists, cancel pending native FileManager.Refresh (avoids
+                        // ~5–60s morph+clothing handler cost, esp. Naturalis TittyMagic banks).
+                        if (TryLightClothingHairCatalogAndSkipNativeRefresh(atom, itemType, FileEntry, normalizedPath))
+                        {
+                            // Pending native refresh cancelled; apply can proceed.
+                        }
+                        else
+                        {
+                            // First-click reliability: if prewarm queued a coalesced refresh, run it now
+                            // before one-shot preset/material lookup work starts.
+                            VamOnDemandLoader.ForceRunPendingCoalescedVamRefresh("pre_apply_prewarm_flush");
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -319,7 +392,16 @@ namespace VPB
                     }
                     catch { }
 
-                    if (true)
+                    // Appearance / Skin / Morphs: light appearance undo (geometry+skin+clothing/hair).
+                    // Clothing/Hair keep the clothing-hair-only snapshot (faster).
+                    bool needsAppearanceUndo = itemType == ItemType.Appearance
+                        || itemType == ItemType.Skin
+                        || itemType == ItemType.Morphs;
+                    if (needsAppearanceUndo)
+                    {
+                        Panel.PushUndoAtomSnapshot(atom);
+                    }
+                    else
                     {
                         ClothingLoadingUtils.ClothingHairUndoState clothingHairSnapshot =
                             ClothingLoadingUtils.CaptureClothingHairUndoState(atom);
@@ -767,8 +849,9 @@ namespace VPB
                                             
                                             bool ddReplaceMode = Panel != null && Panel.DragDropReplaceMode;
                                             bool isPersonClothingPreset = itemType == ItemType.Clothing && ext == ".vap" && storableId == "ClothingPresets";
-                                            ClothingApplyMode mode = ClothingApplyMode.Merge;
-                                            if (itemType == ItemType.Pose) mode = ClothingApplyMode.Replace;
+                                            // Morph/skin/breast presets must REPLACE when toolbox Replace is on.
+                                            // Old default Merge + ReplaceMode=True appended morph banks and deformed persons.
+                                            ClothingApplyMode mode = ResolvePresetMergeMode(itemType, ddReplaceMode);
                                             if (ddReplaceMode && isPersonClothingPreset)
                                             {
                                                 ClothingLoadingUtils.RemoveRealGarmentClothing(atom);
@@ -873,7 +956,16 @@ namespace VPB
                 if (ShouldRetryLegacyToggle(itemType) && SuperController.singleton != null && atom != null)
                 {
                     string atomUid = atom.uid;
-                    SuperController.singleton.StartCoroutine(RetryLegacyToggleAfterRefreshCoroutine(atomUid, legacyPath, normalizedPath, ext));
+                    GalleryPanel.BeginClothingApplyWork();
+                    try
+                    {
+                        SuperController.singleton.StartCoroutine(
+                            RetryLegacyToggleAfterRefreshCoroutine(atomUid, legacyPath, normalizedPath, ext, applySerial));
+                    }
+                    catch
+                    {
+                        GalleryPanel.EndClothingApplyWork();
+                    }
                 }
             }
             else
@@ -882,48 +974,58 @@ namespace VPB
             }
         }
 
-        private IEnumerator RetryLegacyToggleAfterRefreshCoroutine(string atomUid, string legacyPath, string normalizedPath, string ext)
+        private IEnumerator RetryLegacyToggleAfterRefreshCoroutine(string atomUid, string legacyPath, string normalizedPath, string ext, int applySerial)
         {
-            if (string.IsNullOrEmpty(atomUid)) yield break;
-
-            DateTime start = DateTime.UtcNow;
-            bool loggedWait = false;
-            while ((DateTime.UtcNow - start).TotalSeconds < 5.0)
+            try
             {
-                Atom atom = null;
-                try { atom = SuperController.singleton != null ? SuperController.singleton.GetAtomByUid(atomUid) : null; } catch { }
-                if (atom == null) yield break;
+                if (string.IsNullOrEmpty(atomUid)) yield break;
+                if (!GalleryPanel.IsClothingApplySerialCurrent(applySerial)) yield break;
 
-                JSONStorable geometry = null;
-                try { geometry = atom.GetStorableByID("geometry"); } catch { }
-                if (geometry != null)
+                DateTime start = DateTime.UtcNow;
+                bool loggedWait = false;
+                while ((DateTime.UtcNow - start).TotalSeconds < 5.0)
                 {
-                    if (TryToggleLegacyClothingHairParam(geometry, legacyPath, "[DragDropDebug] Deferred toggle")) yield break;
-                    if (!string.Equals(normalizedPath, legacyPath, StringComparison.Ordinal)
-                        && TryToggleLegacyClothingHairParam(geometry, normalizedPath, "[DragDropDebug] Deferred toggle")) yield break;
+                    if (!GalleryPanel.IsClothingApplySerialCurrent(applySerial)) yield break;
 
-                    if (string.Equals(ext, ".vam", StringComparison.OrdinalIgnoreCase))
+                    Atom atom = null;
+                    try { atom = SuperController.singleton != null ? SuperController.singleton.GetAtomByUid(atomUid) : null; } catch { }
+                    if (atom == null) yield break;
+
+                    JSONStorable geometry = null;
+                    try { geometry = atom.GetStorableByID("geometry"); } catch { }
+                    if (geometry != null)
                     {
-                        string vajPath = legacyPath.Substring(0, legacyPath.Length - 4) + ".vaj";
-                        if (TryToggleLegacyClothingHairParam(geometry, vajPath, "[DragDropDebug] Deferred toggle")) yield break;
-                        if (!string.Equals(normalizedPath, legacyPath, StringComparison.Ordinal))
+                        if (TryToggleLegacyClothingHairParam(geometry, legacyPath, "[DragDropDebug] Deferred toggle")) yield break;
+                        if (!string.Equals(normalizedPath, legacyPath, StringComparison.Ordinal)
+                            && TryToggleLegacyClothingHairParam(geometry, normalizedPath, "[DragDropDebug] Deferred toggle")) yield break;
+
+                        if (string.Equals(ext, ".vam", StringComparison.OrdinalIgnoreCase))
                         {
-                            string vajFullPath = normalizedPath.Substring(0, normalizedPath.Length - 4) + ".vaj";
-                            if (TryToggleLegacyClothingHairParam(geometry, vajFullPath, "[DragDropDebug] Deferred toggle")) yield break;
+                            string vajPath = legacyPath.Substring(0, legacyPath.Length - 4) + ".vaj";
+                            if (TryToggleLegacyClothingHairParam(geometry, vajPath, "[DragDropDebug] Deferred toggle")) yield break;
+                            if (!string.Equals(normalizedPath, legacyPath, StringComparison.Ordinal))
+                            {
+                                string vajFullPath = normalizedPath.Substring(0, normalizedPath.Length - 4) + ".vaj";
+                                if (TryToggleLegacyClothingHairParam(geometry, vajFullPath, "[DragDropDebug] Deferred toggle")) yield break;
+                            }
                         }
                     }
+
+                    if (!loggedWait)
+                    {
+                        LogUtil.Log($"[DragDropDebug] Deferred toggle waiting for catalog refresh to expose geometry bools: {legacyPath}");
+                        loggedWait = true;
+                    }
+
+                    yield return new WaitForSeconds(0.15f);
                 }
 
-                if (!loggedWait)
-                {
-                    LogUtil.Log($"[DragDropDebug] Deferred toggle waiting for catalog refresh to expose geometry bools: {legacyPath}");
-                    loggedWait = true;
-                }
-
-                yield return new WaitForSeconds(0.15f);
+                LogUtil.LogWarning($"[DragDropDebug] Deferred toggle timed out waiting for param: {legacyPath}");
             }
-
-            LogUtil.LogWarning($"[DragDropDebug] Deferred toggle timed out waiting for param: {legacyPath}");
+            finally
+            {
+                GalleryPanel.EndClothingApplyWork();
+            }
         }
 
         private static bool TryToggleLegacyClothingHairParam(JSONStorable geometry, string path, string logPrefix)
@@ -994,7 +1096,146 @@ namespace VPB
                 || itemType == ItemType.ClothingPreset
                 || itemType == ItemType.HairPreset
                 || itemType == ItemType.ClothingItem
-                || itemType == ItemType.HairItem;
+                || itemType == ItemType.HairItem
+                || itemType == ItemType.Plugins;
+        }
+
+        static bool IsClothingOrHairApplyType(ItemType itemType)
+        {
+            return itemType == ItemType.Clothing
+                || itemType == ItemType.Hair
+                || itemType == ItemType.ClothingItem
+                || itemType == ItemType.HairItem
+                || itemType == ItemType.ClothingPreset
+                || itemType == ItemType.HairPreset;
+        }
+
+        /// <summary>
+        /// Merge mode for PresetManager LoadPresetFromJSON.
+        /// Pose always replaces. Morphs/skin/breast always replace (merge appends banks → deform).
+        /// Clothing/hair follow toolbox Replace toggle (off = merge/add).
+        /// </summary>
+        static ClothingApplyMode ResolvePresetMergeMode(ItemType itemType, bool dragDropReplaceMode)
+        {
+            if (itemType == ItemType.Pose)
+                return ClothingApplyMode.Replace;
+            if (itemType == ItemType.Morphs
+                || itemType == ItemType.Skin
+                || itemType == ItemType.BreastPhysics)
+                return ClothingApplyMode.Replace;
+            if (IsClothingOrHairApplyType(itemType))
+                return dragDropReplaceMode ? ClothingApplyMode.Replace : ClothingApplyMode.Merge;
+            // General / other storables: honor Replace toggle; default merge only when Add mode.
+            return dragDropReplaceMode ? ClothingApplyMode.Replace : ClothingApplyMode.Merge;
+        }
+
+        /// <summary>
+        /// Light clothing/hair catalog path: RefreshClothingItems/Hair on target; cancel native
+        /// FileManager.Refresh when the item UID is already visible to DAZ.
+        /// </summary>
+        static bool TryLightClothingHairCatalogAndSkipNativeRefresh(
+            Atom atom, ItemType itemType, FileEntry entry, string normalizedPath)
+        {
+            try
+            {
+                if (Settings.Instance == null
+                    || Settings.Instance.PreferLightClothingHairCatalogBeforeNativeRefresh == null
+                    || !Settings.Instance.PreferLightClothingHairCatalogBeforeNativeRefresh.Value)
+                    return false;
+            }
+            catch { return false; }
+
+            if (!IsClothingOrHairApplyType(itemType)) return false;
+            if (atom == null || atom.type != "Person") return false;
+            if (!VamOnDemandLoader.HasPendingCoalescedVamRefresh()) return false;
+
+            bool hair = itemType == ItemType.Hair
+                || itemType == ItemType.HairItem
+                || itemType == ItemType.HairPreset;
+
+            try { VamOnDemandLoader.RefreshPersonClothingHairCatalogs(atom); }
+            catch { }
+
+            if (!GeometryCatalogContainsEntry(atom, entry, normalizedPath, hair))
+                return false;
+
+            VamOnDemandLoader.CancelPendingCoalescedVamRefresh("light_clothing_hair_catalog_ready");
+            try
+            {
+                LogUtil.Log("[VPB OnDemand] Light clothing/hair catalog ready — skipped native FileManager.Refresh");
+            }
+            catch { }
+            return true;
+        }
+
+        static bool GeometryCatalogContainsEntry(Atom atom, FileEntry entry, string normalizedPath, bool hair)
+        {
+            if (atom == null) return false;
+            var selector = atom.GetStorableByID("geometry") as DAZCharacterSelector;
+            if (selector == null) return false;
+
+            // Prefer package UID from entry / path (clothing:PkgUid:/Custom/...).
+            string pkgUid = null;
+            try
+            {
+                if (entry != null && !string.IsNullOrEmpty(entry.Uid))
+                {
+                    string u = entry.Uid.Replace('\\', '/');
+                    int colon = u.IndexOf(":/", StringComparison.Ordinal);
+                    pkgUid = colon > 0 ? u.Substring(0, colon) : null;
+                }
+            }
+            catch { }
+
+            if (string.IsNullOrEmpty(pkgUid) && !string.IsNullOrEmpty(normalizedPath))
+            {
+                string p = normalizedPath.Replace('\\', '/');
+                int colon = p.IndexOf(":/", StringComparison.Ordinal);
+                if (colon > 0) pkgUid = p.Substring(0, colon);
+            }
+
+            if (!string.IsNullOrEmpty(pkgUid))
+            {
+                try
+                {
+                    if (!hair && selector.IsClothingUIDAvailable(pkgUid)) return true;
+                }
+                catch { }
+                try
+                {
+                    var clothing = atom.GetStorableByID("Clothing") as DAZClothingItemControl;
+                    if (!hair && clothing != null && clothing.IsClothingUIDAvailable(pkgUid)) return true;
+                }
+                catch { }
+            }
+
+            // Fallback: any clothing:/hair: bool whose name contains package uid or leaf folder.
+            try
+            {
+                string prefix = hair ? "hair:" : "clothing:";
+                string needle = pkgUid;
+                if (string.IsNullOrEmpty(needle) && !string.IsNullOrEmpty(normalizedPath))
+                {
+                    string p = normalizedPath.Replace('\\', '/');
+                    int slash = p.LastIndexOf('/');
+                    if (slash > 0 && slash + 1 < p.Length)
+                        needle = p.Substring(slash + 1);
+                    if (!string.IsNullOrEmpty(needle) && needle.EndsWith(".vam", StringComparison.OrdinalIgnoreCase))
+                        needle = needle.Substring(0, needle.Length - 4);
+                }
+                if (string.IsNullOrEmpty(needle)) return false;
+
+                foreach (string name in selector.GetBoolParamNames())
+                {
+                    if (string.IsNullOrEmpty(name) || !name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    if (name.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0)
+                        return true;
+                }
+            }
+            catch { }
+
+            return false;
         }
 
         private void CreateGhost(PointerEventData eventData)

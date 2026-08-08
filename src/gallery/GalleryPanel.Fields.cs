@@ -24,6 +24,11 @@ namespace VPB
         private RectTransform loadingBarContainerRT;
         private RectTransform loadingBarFillRT;
         private float _loadingOverlayPulseStart = -1f;
+        /// <summary>
+        /// Filter-randomize / background refresh: rebuild lists without clearing or rebinding the visible grid.
+        /// </summary>
+        private bool _quietGalleryRefresh;
+        private readonly List<FileEntry> _quietDisplayFiles = new List<FileEntry>();
         private float lastScrollTime;
         private Queue<ThumbnailCacheJob> pendingThumbnailCacheJobs = new Queue<ThumbnailCacheJob>();
         private Coroutine thumbnailCacheCoroutine;
@@ -126,6 +131,8 @@ namespace VPB
         private string selectedPath = null;
         private Stack<Action> undoStack = new Stack<Action>();
         private Stack<Action> redoStack = new Stack<Action>();
+        private Stack<string> undoLabelStack = new Stack<string>();
+        private Stack<string> redoLabelStack = new Stack<string>();
         private bool isApplyingUndoRedo = false;
         private List<GameObject> leftActiveTabButtons = new List<GameObject>();
         private List<GameObject> leftSubActiveTabButtons = new List<GameObject>(); // NEW
@@ -208,6 +215,8 @@ namespace VPB
         // VR cold boot: avoid enabling canvas/raycaster before World UI ready.
         private Coroutine _deferredSetVisibleCoroutine;
         private bool _pendingVisibleAfterStartupReady;
+        /// <summary>Show() re-entrancy guard — SetCanvasVisible must not recurse into Show.</summary>
+        private int _showReentrancyDepth;
         private Dictionary<string, float> categoryScrollPositions = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
         // Tracks category keys that were written during this app session (not just loaded from disk cache).
         private HashSet<string> sessionCategoryScrollKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -220,9 +229,34 @@ namespace VPB
         private DateTime _lastCategoryCountsScanTime = DateTime.MinValue;
         
         // Configuration
+        /// <summary>
+        /// Transient override for filter-preset multi-random (replace once then add members).
+        /// Null = use persisted config. Does not write disk.
+        /// Token-scoped so StopCoroutine dispose / superseded gen cannot clear a newer owner.
+        /// </summary>
+        private static bool? _dragDropReplaceModeOverride;
+        private static int _dragDropReplaceOverrideToken;
+
+        /// <summary>
+        /// Bumped when filter-preset randomize restarts so deferred clothing/hair toggles
+        /// from a superseded LoadRandom abort instead of stacking on top of Replace.
+        /// </summary>
+        private static int _clothingApplySerial;
+
+        /// <summary>
+        /// Count of deferred clothing/hair apply coroutines (preset wait / legacy toggle retry).
+        /// Filter-randomize waits for zero so merge steps and rapid re-dice do not race Clear/toggle.
+        /// </summary>
+        private static int _clothingApplyInFlight;
+
         public bool DragDropReplaceMode
         {
-            get { return VPBConfig.Instance != null ? VPBConfig.Instance.DragDropReplaceMode : false; }
+            get
+            {
+                if (_dragDropReplaceModeOverride.HasValue)
+                    return _dragDropReplaceModeOverride.Value;
+                return VPBConfig.Instance != null ? VPBConfig.Instance.DragDropReplaceMode : false;
+            }
             set { 
                 if (VPBConfig.Instance != null) {
                     VPBConfig.Instance.DragDropReplaceMode = value;
@@ -230,6 +264,76 @@ namespace VPB
                     try { VPBConfig.Instance.Save(false); } catch { }
                 }
             }
+        }
+
+        /// <summary>Effective replace/add for clothing apply (honors randomize override).</summary>
+        internal static bool EffectiveDragDropReplaceMode
+        {
+            get
+            {
+                if (_dragDropReplaceModeOverride.HasValue)
+                    return _dragDropReplaceModeOverride.Value;
+                return VPBConfig.Instance != null && VPBConfig.Instance.DragDropReplaceMode;
+            }
+        }
+
+        /// <summary>Capture serial for deferred clothing/hair work; abort if <see cref="InvalidateClothingApplySerial"/> ran.</summary>
+        internal static int CaptureClothingApplySerial()
+        {
+            return _clothingApplySerial;
+        }
+
+        /// <summary>True when deferred apply still belongs to current randomize/load generation.</summary>
+        internal static bool IsClothingApplySerialCurrent(int serial)
+        {
+            return serial == _clothingApplySerial;
+        }
+
+        /// <summary>Invalidate in-flight deferred clothing/hair applies (rapid re-dice).</summary>
+        internal static void InvalidateClothingApplySerial()
+        {
+            _clothingApplySerial++;
+        }
+
+        /// <summary>Mark deferred clothing/hair apply started (pair with <see cref="EndClothingApplyWork"/>).</summary>
+        internal static void BeginClothingApplyWork()
+        {
+            _clothingApplyInFlight++;
+        }
+
+        /// <summary>Mark deferred clothing/hair apply finished or aborted.</summary>
+        internal static void EndClothingApplyWork()
+        {
+            if (_clothingApplyInFlight > 0)
+                _clothingApplyInFlight--;
+        }
+
+        /// <summary>True while deferred clothing/hair apply coroutines still run.</summary>
+        internal static bool HasPendingClothingApplyWork()
+        {
+            return _clothingApplyInFlight > 0;
+        }
+
+        /// <param name="token">Owner id (usually filter-randomize gen). End only clears matching token.</param>
+        internal static void BeginDragDropReplaceOverride(bool replace, int token)
+        {
+            _dragDropReplaceModeOverride = replace;
+            _dragDropReplaceOverrideToken = token;
+        }
+
+        /// <summary>Clear override only if still owned by <paramref name="token"/>.</summary>
+        internal static void EndDragDropReplaceOverride(int token)
+        {
+            if (_dragDropReplaceOverrideToken != token) return;
+            _dragDropReplaceModeOverride = null;
+            _dragDropReplaceOverrideToken = 0;
+        }
+
+        /// <summary>Force-clear override (lifecycle / randomize restart). Ignores token.</summary>
+        internal static void ClearDragDropReplaceOverride()
+        {
+            _dragDropReplaceModeOverride = null;
+            _dragDropReplaceOverrideToken = 0;
         }
 
         public string AppearanceClothingApplyMode
@@ -324,10 +428,12 @@ namespace VPB
         private Text leftCreatorBtnText;
         private Image leftCreatorBtnImage;
         private Image leftCreatorBtnIconImage;
-        /// <summary>Root GO for left creator rail button (null when hide-creator setting destroyed it).</summary>
+        /// <summary>Root GO for left creator rail button (null when hide setting — never created).</summary>
         private GameObject leftCreatorSideBtnGO;
-        /// <summary>Root GO for right creator rail button (null when hide-creator setting destroyed it).</summary>
+        /// <summary>Root GO for right creator rail button (null when hide setting — never created).</summary>
         private GameObject rightCreatorSideBtnGO;
+        /// <summary>One-shot purge of creator rail orphans after create/destroy.</summary>
+        private bool _creatorSideRailOrphansPurged;
         private Text leftPathBtnText;
         private Image leftPathBtnImage;
         private Image leftPathBtnIconImage;
@@ -354,6 +460,7 @@ namespace VPB
 
         private GameObject footerUndoBtnGO;
         private GameObject footerRedoBtnGO;
+        private GameObject footerCommandPaletteBtnGO;
 
         private GameObject rightRemoveAllClothingBtn;
         private Image rightRemoveAllClothingBtnIconImage;
@@ -501,6 +608,9 @@ namespace VPB
         private GameObject titleCreatorDropdown;
         private GameObject titleCreatorDropdownBlocker;
         private InputField titleCreatorDropdownSearchInput;
+        private GameObject titleCreatorRatedOnlyBtn;
+        private Image titleCreatorRatedOnlyBtnBackdrop;
+        private Text titleCreatorRatedOnlyBtnText;
         private string titleCreatorDropdownFilter = "";
         private ScrollRect _titleCreatorVirtScroll;
         private RectTransform _titleCreatorVirtContentRT;
@@ -510,6 +620,8 @@ namespace VPB
         private int _titleCreatorVirtLastFirstIdx = -1;
         private string _titleCreatorVirtViewSig = null;
         private string currentRatingFilter = "";
+        /// <summary>Title-bar Filter license type (VaM meta.json licenseType). Empty = off.</summary>
+        private string currentLicenseFilter = "";
         private string currentSizeFilter = "";
         private string categoryFilter = "";
         private string creatorFilter = "";
@@ -559,6 +671,17 @@ namespace VPB
             Off = 0,
             LoadedOnly = 1,
             UnloadedOnly = 2
+        }
+
+        /// <summary>
+        /// Title-bar ★ presence filter. Primary click cycles Off → RatedOnly → UnratedOnly → Off
+        /// (VR laser = left only). RMB clears when armed.
+        /// </summary>
+        private enum RatingPresenceFilterMode : byte
+        {
+            Off = 0,
+            RatedOnly = 1,
+            UnratedOnly = 2
         }
 
         // Title-bar Filter cycles (per-category via CategoryFilterState; settings mirrored when applied).
@@ -997,6 +1120,10 @@ namespace VPB
         // Fixed desktop dock "Top": side rail buttons live on footer bar.
         private GameObject _footerSideButtonsGroupGO;
         private RectTransform _footerSideButtonsGroupRT;
+        private LayoutElement _footerSideButtonsGroupLE;
+        private RectTransform _footerCenterSectionRT;
+        private HorizontalLayoutGroup _footerCenterHLG;
+        private RectTransform _footerPerfGroupRT;
         private RectTransform _footerLeftSectionRT;
         private RectTransform _footerRightSectionRT;
         private bool _titleBarSideButtonsReparented;
@@ -1091,7 +1218,12 @@ namespace VPB
         private RectTransform hoverPathRT;
         private CanvasGroup hoverPathCanvasGroup;
         private Coroutine hoverFadeCoroutine;
-        // Hover preview overlay (stationary user position on canvas; drag placeholder in settings)
+        /// <summary>
+        /// UIHoverReveal that currently owns the hover-path row. Deferred grid exit must not
+        /// clear path when pointer already moved onto another cell (sibling enter claims first).
+        /// </summary>
+        private UIHoverReveal _hoverPathRevealOwner;
+        // Hover preview overlay (canvas-local X/Y offset + size; drag placeholder in settings)
         private GameObject hoverPreviewGO;
         private RectTransform hoverPreviewRT;
         private RawImage hoverPreviewImage;
@@ -1302,6 +1434,12 @@ namespace VPB
         public static readonly Color ColorCreator = new Color(0.60f, 0.45f, 0.15f, 1f);
         public static readonly Color ColorTagFilter = new Color(0.50f, 0.20f, 0.50f, 1f);
         public static readonly Color ColorRatingFilter = new Color(0.70f, 0.60f, 0.20f, 1f);
+        /// <summary>★ Not-rated filter armed (slate; distinct from rated purple accent).</summary>
+        public static readonly Color ColorUnratedFilterAccent = new Color(0.28f, 0.45f, 0.58f, 1f);
+        /// <summary>★ Not-rated label/text tint on title-bar chrome.</summary>
+        public static readonly Color ColorUnratedFilterLabel = new Color(0.55f, 0.78f, 1f, 1f);
+        /// <summary>★ Not-rated icon tint when presence filter armed.</summary>
+        public static readonly Color ColorUnratedFilterIcon = new Color(0.65f, 0.85f, 1f, 1f);
         public static readonly Color ColorSourceFilter = new Color(0.20f, 0.40f, 0.70f, 1f);
         public static readonly Color ColorSubfilterFilter = new Color(0.35f, 0.35f, 0.60f, 1f);
         public static readonly Color ColorUserTagFilter = new Color(0.55f, 0.28f, 0.55f, 1f);
@@ -1319,6 +1457,11 @@ namespace VPB
         private string temporaryStatusMsg = null;
         private Coroutine temporaryStatusCoroutine = null;
         private GameObject temporaryStatusOwner = null;
+        // Sticky hover tip: instant show; hide grace only (no show dwell / fade).
+        private string _stickyTipDesired;
+        private GameObject _stickyTipDesiredOwner;
+        private bool _stickyTipHidePending;
+        private float _stickyTipHideAt;
 
         public bool isFixedLocally = false;
         private bool isCollapsed = false;
@@ -1338,16 +1481,26 @@ namespace VPB
 
         // Per-category filter state memory (BA-style: each category remembers its own filters)
         private readonly Dictionary<string, CategoryFilterState> _categoryFilterStates = new Dictionary<string, CategoryFilterState>(StringComparer.OrdinalIgnoreCase);
+        /// <summary>Stable browse-memory key. Assigned by <see cref="Gallery.AddPanel"/> — never GetHashCode (that broke SQL restore after Close/restart).</summary>
         private string _panelId = null;
+        internal const string PrimaryPanelId = "panel_0";
+        private Coroutine _deferredCollapseLayoutCo;
 
         private string PanelId
         {
             get
             {
-                if (_panelId == null)
-                    _panelId = "panel_" + GetHashCode().ToString("x8");
+                if (string.IsNullOrEmpty(_panelId))
+                    _panelId = PrimaryPanelId;
                 return _panelId;
             }
+        }
+
+        /// <summary>Gallery assigns slot ids (<c>panel_0</c>, <c>panel_1</c>, …) so filter SQL survives Close + recreate.</summary>
+        internal void AssignStablePanelId(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return;
+            _panelId = id;
         }
 
         // Sorting
@@ -1414,7 +1567,12 @@ namespace VPB
         private Image _langBtnImage;
         private GameObject languageMenuPopupGO;
         private bool languageMenuOpen;
-        private bool isRatingSortToggleEnabled;
+        private RatingPresenceFilterMode _ratingPresenceFilterMode;
+        /// <summary>Scratch for rating-mutate prune (reuse; warm path, no per-click HashSet churn).</summary>
+        private readonly List<FileEntry> _ratingMutatedScratch = new List<FileEntry>(8);
+        private readonly List<FileEntry> _ratingPruneSurvivingSelected = new List<FileEntry>(8);
+        private HashSet<FileEntry> _ratingPruneRemoveRefs;
+        private HashSet<string> _ratingPruneRemoveKeys;
 
         // Tracks panels hidden when a save flow starts, so they can be restored when it ends
         private List<Canvas> _canvasesHiddenForSave;

@@ -173,7 +173,8 @@ namespace VPB
             }
 
             // Sort once (in-place) then virtualize visible rows only.
-            var sortState = GetSortState("Creator");
+            // Rated-only may override display to Rating; saved Creator sort stays unless user picks Rating.
+            var sortState = GetCreatorListSortState();
             GallerySortManager.Instance.SortCreators(displayCreators, sortState);
 
             string sig = ComputeCreatorVirtViewSignature();
@@ -209,6 +210,7 @@ namespace VPB
                     if (string.IsNullOrEmpty(c.Name)) continue;
                     if (!string.IsNullOrEmpty(filterNow) && c.Name.IndexOf(filterNow, StringComparison.OrdinalIgnoreCase) < 0) continue;
                     if (creatorsInResults != null && !creatorsInResults.Contains(c.Name)) continue;
+                    if (!CreatorPassesRatedOnlyFilter(c.Name)) continue;
                     _creatorVirtView.Add(c);
                 }
 

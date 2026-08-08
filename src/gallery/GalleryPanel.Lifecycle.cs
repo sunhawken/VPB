@@ -13,6 +13,7 @@ namespace VPB
         public void Close()
         {
             VpbPerfDiag.LogTransition("GalleryPanel.Close", null);
+            try { PersistCurrentBrowsePlace(); } catch { }
             if (Gallery.singleton != null)
             {
                 Gallery.singleton.RemovePanel(this);
@@ -61,14 +62,8 @@ namespace VPB
                     rightSideContainer.SetActive(mode == "Both" || mode == "Right");
             }
 
-            bool showLeftSide = !isCollapsed && (mode == "Both" || mode == "Left");
-            if (fixedMode && string.Equals(dock, "Left", StringComparison.OrdinalIgnoreCase)) showLeftSide = false;
-
-            bool showRightSide = !isCollapsed && (mode == "Both" || mode == "Right");
-            if (fixedMode && !string.Equals(dock, "Left", StringComparison.OrdinalIgnoreCase)) showRightSide = false;
-
-            // Hide-creator setting wins over rail mode — enforce first, then show only if off.
-            ApplyCreatorSideRailButtonVisibility(showLeftSide, showRightSide);
+            // Creator chips: no SetActive here. Presence-only (see SyncCreatorSideRailPresence).
+            // Visibility = parent rail container, same as Category/Path.
 
             // Keep History side buttons on the same purple family as active side-tab buttons.
             Color historyBackdrop = ColorHistoryAccent;
@@ -78,17 +73,29 @@ namespace VPB
             if (leftHistoryBtnIconImage != null) leftHistoryBtnIconImage.color = UI.SideRailIconGlyphTint;
         }
 
+        private const string CreatorSideRailBtnNameLeft = "VPB_SideRail_Creator_L";
+        private const string CreatorSideRailBtnNameRight = "VPB_SideRail_Creator_R";
+
         private static bool HideCreatorSideRailButtonsRequested()
         {
             return VPBConfig.Instance != null && VPBConfig.Instance.GalleryHideCreatorSideButtons;
         }
 
+        private bool IsCreatorSideRailButtonGO(GameObject go)
+        {
+            if (go == null) return false;
+            if (leftCreatorSideBtnGO != null && go == leftCreatorSideBtnGO) return true;
+            if (rightCreatorSideBtnGO != null && go == rightCreatorSideBtnGO) return true;
+            string n = go.name;
+            return n == CreatorSideRailBtnNameLeft || n == CreatorSideRailBtnNameRight;
+        }
+
         /// <summary>
-        /// Creator rail buttons: hide setting wins — destroy buttons (not just SetActive) so layout/top-dock
-        /// cannot resurrect them when a side pane unhides. Only when setting is off: ensure exist, then show
-        /// per rail mode.
+        /// Cold/warm presence sync only (settings toggle / Init). Not called from layout refresh.
+        /// Hide on → chips absent. Hide off → chips exist and stay activeSelf like Category;
+        /// rail container SetActive owns show/hide (collapse / fixed dock / ShowSideButtons).
         /// </summary>
-        private void ApplyCreatorSideRailButtonVisibility(bool showLeftSide, bool showRightSide)
+        private void SyncCreatorSideRailPresence()
         {
             if (HideCreatorSideRailButtonsRequested())
             {
@@ -99,82 +106,180 @@ namespace VPB
                 {
                     try { SyncActiveContentTypeFromSidePanels(); } catch { }
                 }
-                DestroyCreatorSideRailButton(isLeft: true);
-                DestroyCreatorSideRailButton(isLeft: false);
+                DestroyCreatorSideRailButtons();
                 return;
             }
 
             EnsureCreatorSideRailButtonsExist();
-            if (leftCreatorSideBtnGO != null && leftCreatorSideBtnGO.activeSelf != showLeftSide)
-                leftCreatorSideBtnGO.SetActive(showLeftSide);
-            if (rightCreatorSideBtnGO != null && rightCreatorSideBtnGO.activeSelf != showRightSide)
-                rightCreatorSideBtnGO.SetActive(showRightSide);
+            // Match Category: leave activeSelf true; parent container gates visibility.
+            if (leftCreatorSideBtnGO != null && !leftCreatorSideBtnGO.activeSelf)
+                leftCreatorSideBtnGO.SetActive(true);
+            if (rightCreatorSideBtnGO != null && !rightCreatorSideBtnGO.activeSelf)
+                rightCreatorSideBtnGO.SetActive(true);
         }
 
-        /// <summary>Re-apply creator hide using current ShowSideButtons / dock / collapsed (layout paths).</summary>
+        /// <summary>Settings / config: sync creator chip presence once, then relayout.</summary>
         private void EnforceCreatorSideRailButtonVisibilityFromConfig()
         {
-            if (VPBConfig.Instance == null) return;
-            string mode = VPBConfig.Instance.ShowSideButtons;
-            bool fixedMode = isFixedLocally;
-            string dock = "Right";
-            try { dock = VPBConfig.NormalizeDesktopFixedDockSide(VPBConfig.Instance.DesktopFixedDockSide); } catch { dock = "Right"; }
-
-            bool showLeftSide = !isCollapsed && (mode == "Both" || mode == "Left");
-            if (fixedMode && string.Equals(dock, "Left", StringComparison.OrdinalIgnoreCase)) showLeftSide = false;
-
-            bool showRightSide = !isCollapsed && (mode == "Both" || mode == "Right");
-            if (fixedMode && !string.Equals(dock, "Left", StringComparison.OrdinalIgnoreCase)) showRightSide = false;
-
-            ApplyCreatorSideRailButtonVisibility(showLeftSide, showRightSide);
+            SyncCreatorSideRailPresence();
         }
 
-        private void DestroyCreatorSideRailButton(bool isLeft)
+        private static void RemoveCreatorSideButtonFromList(List<RectTransform> list, GameObject go)
         {
-            GameObject go = isLeft ? leftCreatorSideBtnGO : rightCreatorSideBtnGO;
-            List<RectTransform> list = isLeft ? leftSideButtons : rightSideButtons;
-            if (go != null)
+            if (list == null || go == null) return;
+            for (int i = list.Count - 1; i >= 0; i--)
             {
-                if (list != null)
-                {
-                    RectTransform rt = go.GetComponent<RectTransform>();
-                    if (rt != null) list.Remove(rt);
-                }
-                try { UnityEngine.Object.Destroy(go); } catch { }
+                RectTransform rt = list[i];
+                if (rt != null && rt.gameObject == go)
+                    list.RemoveAt(i);
             }
+        }
+
+        private void ClearCreatorSideRailButtonComponentRefs(bool isLeft)
+        {
             if (isLeft)
             {
-                leftCreatorSideBtnGO = null;
-                leftCreatorBtnImage = null;
                 leftCreatorBtnText = null;
+                leftCreatorBtnImage = null;
                 leftCreatorBtnIconImage = null;
             }
             else
             {
-                rightCreatorSideBtnGO = null;
-                rightCreatorBtnImage = null;
                 rightCreatorBtnText = null;
+                rightCreatorBtnImage = null;
                 rightCreatorBtnIconImage = null;
             }
+        }
+
+        private void DestroyOneCreatorSideRailButton(ref GameObject go, List<RectTransform> list, bool isLeft)
+        {
+            // Unity fake-null: destroyed GO still referenced until cleared.
+            if (go == null)
+            {
+                go = null;
+                ClearCreatorSideRailButtonComponentRefs(isLeft);
+                return;
+            }
+            RemoveCreatorSideButtonFromList(list, go);
+            ClearCreatorSideRailButtonComponentRefs(isLeft);
+            GameObject victim = go;
+            go = null;
+            try { UnityEngine.Object.DestroyImmediate(victim); }
+            catch
+            {
+                try { UnityEngine.Object.Destroy(victim); } catch { }
+            }
+        }
+
+        private void DestroyCreatorSideRailButtons()
+        {
+            bool hadAny = leftCreatorSideBtnGO != null || rightCreatorSideBtnGO != null;
+            DestroyOneCreatorSideRailButton(ref leftCreatorSideBtnGO, leftSideButtons, isLeft: true);
+            DestroyOneCreatorSideRailButton(ref rightCreatorSideBtnGO, rightSideButtons, isLeft: false);
+            if (hadAny || !_creatorSideRailOrphansPurged)
+            {
+                try { PurgeAllOrphanCreatorSideRailButtons(); } catch { }
+                _creatorSideRailOrphansPurged = true;
+            }
+        }
+
+        private bool LooksLikeOrphanCreatorSideButton(GameObject go, GameObject keep)
+        {
+            if (go == null || (keep != null && go == keep)) return false;
+            string n = go.name;
+            if (n == CreatorSideRailBtnNameLeft || n == CreatorSideRailBtnNameRight) return true;
+            if (galleryCreatorSprite == null) return false;
+            Transform iconT = go.transform.Find("Icon");
+            if (iconT == null) return false;
+            Image iconImg = iconT.GetComponent<Image>();
+            return iconImg != null && iconImg.sprite == galleryCreatorSprite;
+        }
+
+        private void PurgeOrphanCreatorSideRailButtons(Transform parent, GameObject keep)
+        {
+            if (parent == null) return;
+            for (int i = parent.childCount - 1; i >= 0; i--)
+            {
+                Transform c = parent.GetChild(i);
+                if (c == null) continue;
+                GameObject go = c.gameObject;
+                if (!LooksLikeOrphanCreatorSideButton(go, keep)) continue;
+                if (leftCreatorSideBtnGO != null && go == leftCreatorSideBtnGO) continue;
+                if (rightCreatorSideBtnGO != null && go == rightCreatorSideBtnGO) continue;
+                try { UnityEngine.Object.DestroyImmediate(go); }
+                catch
+                {
+                    try { UnityEngine.Object.Destroy(go); } catch { }
+                }
+            }
+        }
+
+        private void PurgeAllOrphanCreatorSideRailButtons()
+        {
+            PurgeOrphanCreatorSideRailButtons(leftSideContainer != null ? leftSideContainer.transform : null, leftCreatorSideBtnGO);
+            PurgeOrphanCreatorSideRailButtons(rightSideContainer != null ? rightSideContainer.transform : null, rightCreatorSideBtnGO);
+            PurgeOrphanCreatorSideRailButtons(_footerSideButtonsGroupRT, leftCreatorSideBtnGO);
+        }
+
+        private void AdoptCreatorSideButtonParent(GameObject go, bool isLeft)
+        {
+            if (go == null) return;
+            if (isLeft && IsFixedTopDockMode() && _titleBarSideButtonsReparented && _footerSideButtonsGroupRT != null)
+            {
+                if (go.transform.parent != _footerSideButtonsGroupRT)
+                    go.transform.SetParent(_footerSideButtonsGroupRT, worldPositionStays: false);
+                return;
+            }
+            GameObject container = isLeft ? leftSideContainer : rightSideContainer;
+            if (container == null) return;
+            if (go.transform.parent != container.transform)
+                go.transform.SetParent(container.transform, worldPositionStays: false);
         }
 
         private void EnsureCreatorSideRailButtonsExist()
         {
             if (HideCreatorSideRailButtonsRequested()) return;
+
+            if (leftCreatorSideBtnGO == null) leftCreatorSideBtnGO = null;
+            if (rightCreatorSideBtnGO == null) rightCreatorSideBtnGO = null;
+
+            bool needLeft = leftCreatorSideBtnGO == null && leftSideContainer != null;
+            bool needRight = rightCreatorSideBtnGO == null && rightSideContainer != null;
+            if (needLeft || needRight)
+            {
+                try { PurgeAllOrphanCreatorSideRailButtons(); } catch { }
+            }
+
             bool created = false;
-            if (leftCreatorSideBtnGO == null && leftSideContainer != null)
+            if (needLeft)
             {
                 CreateLeftCreatorSideRailButton();
                 created = true;
             }
-            if (rightCreatorSideBtnGO == null && rightSideContainer != null)
+            else if (leftCreatorSideBtnGO != null)
+            {
+                AdoptCreatorSideButtonParent(leftCreatorSideBtnGO, isLeft: true);
+            }
+
+            if (needRight)
             {
                 CreateRightCreatorSideRailButton();
                 created = true;
             }
+            else if (rightCreatorSideBtnGO != null)
+            {
+                AdoptCreatorSideButtonParent(rightCreatorSideBtnGO, isLeft: false);
+            }
+
             if (created)
             {
-                try { ApplySideButtonScale(); } catch { }
+                _creatorSideRailOrphansPurged = false;
+                try { ApplySideButtonScale(UiMetrics, false); } catch { }
+            }
+            if (!_creatorSideRailOrphansPurged)
+            {
+                try { PurgeAllOrphanCreatorSideRailButtons(); } catch { }
+                _creatorSideRailOrphansPurged = true;
             }
         }
 
@@ -199,7 +304,12 @@ namespace VPB
 
         private void CreateLeftCreatorSideRailButton()
         {
+            if (HideCreatorSideRailButtonsRequested()) return;
             if (leftSideContainer == null || leftCreatorSideBtnGO != null) return;
+            PurgeOrphanCreatorSideRailButtons(leftSideContainer.transform, null);
+            if (_footerSideButtonsGroupRT != null)
+                PurgeOrphanCreatorSideRailButtons(_footerSideButtonsGroupRT, null);
+
             float btnWidth = GalleryUiDesignTokens.SideButtonWidthRef;
             float btnHeight = GalleryUiDesignTokens.SideButtonHeightRef;
             float sideIconBtn = GalleryUiDesignTokens.SideButtonSquareRef;
@@ -208,7 +318,8 @@ namespace VPB
             float crW = galleryCreatorSprite != null ? sideIconBtn : btnWidth;
             float crH = galleryCreatorSprite != null ? sideIconBtn : btnHeight;
 
-            GameObject leftCreatorBtn = UI.CreateUIButton(leftSideContainer, crW, crH, " ", 8, 0, 0, AnchorPresets.centre, () => ToggleLeft(ContentType.Creator));
+            GameObject leftCreatorBtn = UI.CreateUIButton(leftSideContainer, crW, crH, " ", 8, 0, 0, AnchorPresets.centre, () => ToggleSideFromRailButton(ContentType.Creator, true, false));
+            leftCreatorBtn.name = CreatorSideRailBtnNameLeft;
             leftCreatorSideBtnGO = leftCreatorBtn;
             leftCreatorBtnImage = leftCreatorBtn.GetComponent<Image>();
             leftCreatorBtnText = leftCreatorBtn.GetComponentInChildren<Text>(true);
@@ -230,13 +341,17 @@ namespace VPB
                 leftCreatorBtnIconImage = null;
             }
             InsertCreatorSideButtonIntoList(leftSideButtons, leftCreatorBtn.GetComponent<RectTransform>(), leftUserTagsSideBtn, leftPathBtnText);
-            AddRightClickDelegate(leftCreatorBtn, () => ToggleRight(ContentType.Creator));
+            AdoptCreatorSideButtonParent(leftCreatorBtn, isLeft: true);
+            AddRightClickDelegate(leftCreatorBtn, () => ToggleSideFromRailButton(ContentType.Creator, true, true));
             AddTooltip(leftCreatorBtn, "gallery.tooltip.creator_list", "Browse creators (side list). Title bar filters the grid.");
         }
 
         private void CreateRightCreatorSideRailButton()
         {
+            if (HideCreatorSideRailButtonsRequested()) return;
             if (rightSideContainer == null || rightCreatorSideBtnGO != null) return;
+            PurgeOrphanCreatorSideRailButtons(rightSideContainer.transform, null);
+
             float btnWidth = GalleryUiDesignTokens.SideButtonWidthRef;
             float btnHeight = GalleryUiDesignTokens.SideButtonHeightRef;
             float sideIconBtn = GalleryUiDesignTokens.SideButtonSquareRef;
@@ -246,8 +361,9 @@ namespace VPB
             float crH = galleryCreatorSprite != null ? sideIconBtn : btnHeight;
 
             GameObject rightCreatorBtn = UI.CreateUIButton(rightSideContainer, crW, crH, " ", 8, 0, 0, AnchorPresets.centre, () => {
-                if (isFixedLocally) ToggleLeft(ContentType.Creator); else ToggleRight(ContentType.Creator);
+                ToggleSideFromRailButton(ContentType.Creator, false, false);
             });
+            rightCreatorBtn.name = CreatorSideRailBtnNameRight;
             rightCreatorSideBtnGO = rightCreatorBtn;
             rightCreatorBtnImage = rightCreatorBtn.GetComponent<Image>();
             rightCreatorBtnText = rightCreatorBtn.GetComponentInChildren<Text>(true);
@@ -269,7 +385,8 @@ namespace VPB
                 rightCreatorBtnIconImage = null;
             }
             InsertCreatorSideButtonIntoList(rightSideButtons, rightCreatorBtn.GetComponent<RectTransform>(), rightUserTagsSideBtn, rightPathBtnText);
-            AddRightClickDelegate(rightCreatorBtn, () => ToggleRight(ContentType.Creator));
+            AdoptCreatorSideButtonParent(rightCreatorBtn, isLeft: false);
+            AddRightClickDelegate(rightCreatorBtn, () => ToggleSideFromRailButton(ContentType.Creator, false, true));
             AddTooltip(rightCreatorBtn, "gallery.tooltip.creator_list", "Browse creators (side list). Title bar filters the grid.");
         }
 
@@ -312,7 +429,6 @@ namespace VPB
             VPBConfig.Instance.ConfigChanged += RefreshCategoryQuickSwitchOnConfigChanged;
             VPBConfig.Instance.ConfigChanged += OnGalleryTransparencyConfigChanged;
             VPBConfig.Instance.ConfigChanged += ApplySpringScrollButtonFromConfig;
-            VPBConfig.Instance.ConfigChanged += SyncTboxPinnedFromConfig;
         }
 
         private void UnsubscribeGalleryPanelFromVpBConfigChanged()
@@ -328,7 +444,6 @@ namespace VPB
             VPBConfig.Instance.ConfigChanged -= RefreshCategoryQuickSwitchOnConfigChanged;
             VPBConfig.Instance.ConfigChanged -= OnGalleryTransparencyConfigChanged;
             VPBConfig.Instance.ConfigChanged -= ApplySpringScrollButtonFromConfig;
-            VPBConfig.Instance.ConfigChanged -= SyncTboxPinnedFromConfig;
         }
 
         private void OnGalleryTransparencyConfigChanged()
@@ -339,10 +454,43 @@ namespace VPB
         void OnDestroy()
         {
             StopCo(ref _categoryQuickApplyCoroutine);
+            try { _filterRandomizeGen++; } catch { }
+            StopCo(ref _filterRandomizeCo);
+            try { ClearDragDropReplaceOverride(); } catch { }
+            try { InvalidateClothingApplySerial(); } catch { }
+            try
+            {
+                if (_quietGalleryRefresh)
+                {
+                    _quietGalleryRefresh = false;
+                    _quietDisplayFiles.Clear();
+                }
+            }
+            catch { }
+
+            // Creator Strip: clear static suppress + stop routine before canvas teardown.
+            try
+            {
+                if (creatorModeStripRoutine != null)
+                {
+                    try { StopCoroutine(creatorModeStripRoutine); } catch { }
+                    creatorModeStripRoutine = null;
+                }
+                creatorModeStripBusy = false;
+                SuppressAtomRemovedGalleryNotify = false;
+                if (_stripKeepSubScenePickActive)
+                {
+                    try { StripKeepAbortSubScenePickMode(reopenStrip: false); } catch { }
+                }
+                try { HideStripKeepSelectorInternal(resetSession: true); } catch { }
+                creatorModeActive = false;
+            }
+            catch { }
 
             RemoveModeDestroyPopup();
 
             _gridHoverBadgeBtnGO = null;
+            _hoverPathRevealOwner = null;
 
             // Re-enable saving on teardown so the cache isn't left permanently paused.
             if (GalleryThumbnailCache.Instance != null)

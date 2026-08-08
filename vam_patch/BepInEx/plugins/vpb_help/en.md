@@ -1,6 +1,6 @@
 # VBP Gallery Help
 
-Tip: open this panel with **?** on the title bar. Use the search box to find topics. Colored icon links in the text show a preview when you hover them.
+Tip: press **?** or **F1** to open **Hotkeys** (Esc closes). Title-bar help button opens the full searchable panel. Colored icon links in the text show a preview when you hover them.
 
 ## Filtering
 
@@ -31,11 +31,12 @@ Tap the **colored header bar** at the top of a side column to collapse that list
 - Empty draft: **Backspace** removes last chip. **ESC** closes search without clearing chips.
 - Bare words, tags, badges, loaded/starred, **AND** / **OR** / **IF** — full syntax in **Advanced search** (help nav).
 - **Side-column search** — filters only the **open list** (categories / creators / tags / paths), not the grid.
-- {{icon:filter|Filter presets}} — funnel icon; save the current filter setup or load a saved preset.
+- {{icon:filter|Filter presets}} — funnel icon; save the current filter setup or load a saved preset. **Alt+F** toggles the **floating** presets window (detaches if needed; **hide keeps float position**). Top of list: **Save Preset** | **Update** (when a preset is active) | **Merge to New**, then **Float as Window** when docked. Search presets by name; **sort** cycles Manual / A→Z / Z→A / Pinned first. Float chrome: **chevron** collapses body (collapsed title shows **pinned Dice** shortcuts) / expands; **X** hides and keeps float; footer **Dock** reattaches under the title chip; footer **Undo** appears briefly after deleting a preset (**U** also undoes). Title-bar funnel still toggles visibility. **Merge to New** enters select mode (2–6 presets); **Create** names the result from selected names joined with `+` — **click** applies all member filters as one OR browse; **dice** loads a random item from each member in order, then restores your view. Side **Replace/Add** applies once per clothing/hair family when dice runs a merged set. Pinned presets sit at the top and appear in title **…** as **Apply:** / **Rnd:**. Recent applies appear as **Recent:**. Row **●** marks the active preset; **●*** means filters drifted — use **Update** (or **Ctrl+S**). **More** (edit icon / right-click) shows **pin**, **inline rename**, and **delete** (Confirm / Cancel on the row; Esc cancels; soft-undo for a few seconds). Dice **randomizes** without closing the list. Keyboard while open: **↑↓** select, **Enter** apply, **D** dice, **Ctrl+S** save/update, **Esc** cancel mode then hide.
 - **Creator filter** (title bar) — multi-select authors to limit the **grid** (or **…** overflow when narrow). Rail {{icon:creator|Creator}} opens the **creator list**.
 - **Category** — title name/menu = **quick switch**; rail {{icon:category|Category}} opens the **full category list**.
 - **Source filter** — All, Local, or VAR packages.
-- {{icon:star|Rated only (★)}} — show only starred items.
+- **License** — under **Filter** menu; pick a VaM license type (CC BY, PC, FC, …). Click license in the info strip to filter by that type (click again clears).
+- {{icon:star|Rated / Not rated (★)}} — cycle: rated only → not rated → off (VR laser OK). Right-click clears.
 - **Sort** — **Az** opens sort type; arrow toggles ascending/descending.
 - {{icon:refresh|Refresh}} — reload the list.
 
@@ -90,6 +91,7 @@ Grid letter badges: **A** auto-install, **H** hidden, **W** scan-whitelist exclu
 - `loaded` / `installed` — under AddonPackages (or local loose files)
 - `unloaded` — not loaded (e.g. AllPackages)
 - `starred` / `rated` / `badge:star` — has a star rating
+- `unrated` / `not-rated` — no star rating
 - `tagged` / `badge:t` — has user-tag badge **T**
 - `untagged` — no user tags
 - `autoinstall` / `badge:a` — auto-install badge **A**
@@ -130,6 +132,7 @@ Use **Edit** in the Tags column header to open the tag editor **Database** mode 
 
 - **Left-click** — open import sidebar on the same side as the button.
 - **Right-click** — open it on the **opposite** side.
+- Header **float** chip / **Alt+I** — detach as a **resizable floating window** (position and size remembered). **X** / **Esc** hide and keep float; footer **Dock** reattaches as the side column and **stays open**. Floating Import does not push the grid inset.
 
 ### Import sidebar steps
 1. Select **exactly one scene** in the grid (multi-select blocks import).
@@ -156,7 +159,7 @@ Select rows, then use the **toolbox** at the bottom for cleanup actions: filter 
 - **Ctrl+click** — add or remove a row from selection.
 - **Shift+click** — select a range from the last anchor.
 - **Ctrl+A** — select all visible rows.
-- **Escape** — clear selection when no menu is open.
+- **Escape** — clear selection when no menu/mode claimed Esc (see Hotkeys).
 
 Select one or more rows to expand the **toolbox** at the bottom (hover the bar if it is collapsed).
 
@@ -189,11 +192,12 @@ Availability depends on category and selection:
 The **Target** dropdown in the toolbox picks which **Person** atom receives presets, clothing, hair, and imports.
 
 ### Scene helper side lists
-Lower side-rail buttons help edit the open scene (not the package grid):
+Lower side-rail buttons help edit the open scene (not the package grid). Three different “remove” families:
 
-- **Remove clothing** — find and remove clothing on persons.
-- **Remove hair** — remove hair items.
-- **Remove atom** — remove atoms from the scene.
+- **Unequip clothing / hair** — list and unequip wearables on persons (not package Delete).
+- **Unequip / remove atom** — remove atoms from the scene via the side list.
+- **Scene Eraser** (separate rail tool) — point-and-click erase in the 3D scene; **Esc** exits.
+- **Delete** (toolbox) — move packages/scenes to Deleted* folders on disk.
 - **Target** — pick or filter target persons for apply operations.
 
 ## Layout
@@ -222,7 +226,7 @@ A **tip strip** under the title bar shows basics until you dismiss it (×).
 
 ### Footer utilities
 - **U / R** — Undo / Redo
-- **Rdm** — load random item
+- **Rdm** — load random item from the **current** filtered view (not a saved preset; use Filter presets dice for that)
 - {{icon:hub|Hub}} — Hub browse panel
 - **M** — VaM menu gate; hide gallery when VaM menu is closed
 - **H** — show hidden packages
@@ -237,8 +241,12 @@ Pagination sits at the bottom-left when the list has multiple pages.
 The **Target** menu in the toolbox chooses which **Person** atom gets appearances, clothing, hair, poses, and scene imports.
 
 ### Applying from the grid
-- **Single-click** or **double-click** — set in Settings → Browse → Interaction.
-- {{icon:hold|Hold-to-launch}} (footer) — hold mouse or controller on a thumbnail to apply.
+- **Apply** — single-click or double-click (Settings → Browse → Interaction; side-rail toggle). Commits to the target Person.
+- **Try-On** (Settings → Interaction) — eligible clothing/hair/skin/morph/appearance/pose/plugin applies preview first. Toolbox bar: **Keep** / **Revert** / Compare; **Esc** reverts. Next try auto-keeps the previous preview (status toast).
+- **Import to atom** — Scene Import sidebar button (not grid Apply): copy resources from a scene onto a Person.
+- **Load scene** — scenes/vars use load/drag paths, not Apply.
+- **Enter** / **Space** — same as click Apply / Try-On intercept.
+- {{icon:hold|Hold-to-launch}} (footer) — hold mouse or controller on a thumbnail to apply (overrides 1-Click toggle).
 - **Replace vs merge** (side rail in appearance categories) — toggles whether clothing/hair replaces or merges.
 
 ### Drag and drop
@@ -251,17 +259,54 @@ Use {{icon:undo|Undo}} / **Redo** in the footer after supported edits.
 
 ## Hotkeys
 
-Change defaults in **Settings → Hotkeys**:
+Press **?** or **F1** anytime the gallery is focused to jump here. **Esc** closes this panel. Change the show/hide gallery key in **Settings → Hotkeys**.
 
-- **Ctrl+V** — show / hide gallery
-- **Arrow keys** — move selection in the grid
-- **Ctrl+A** — select all visible items
-- **Delete / Backspace** — delete eligible selection
-- **Ctrl+Z / Ctrl+R** — undo / redo
+### Gallery chrome
+- **Ctrl+V** (default) — show / hide gallery (configurable)
+- **?** / **F1** — open / close this Hotkeys sheet
+- **Ctrl+Shift+P** — command palette (also footer left chip next to Undo/Redo). Type to filter commands + categories; ↑↓ / Enter / Esc. Groups: Edit, Browse, Modes, Selection, Packages, View, Help. Recent list on open. Grey rows = unavailable (need selection / mode).
+- **Esc** — close help/menus/search, then exit Scene Tools / Scene Eraser / Try-On (revert) / Cleanup / Import, else clear selection (ladder: innermost first)
+- **Ctrl+Alt+= / Ctrl+Alt+-** — gallery UI scale up / down (also keypad +/-; separate from grid zoom). New installs auto-pick a desktop starting scale from screen height; desktop chrome also multiplies by VaM Monitor UI Scale.
 - **Ctrl + mouse wheel** — grid columns (+ / − in footer too)
-- **Ctrl+Alt+= / Ctrl+Alt+-** — gallery UI scale up / down (also keypad +/-; separate from Ctrl+scroll grid zoom)
-- **Escape** — close menus, search popup, help panel
-- **?** (title bar) — open this help
+
+### Browse and search
+- **Ctrl+F** — focus title search (opens compact popup if needed)
+- **Alt+F** — open / close floating filter presets (hide keeps float; Dock reattaches)
+- **Alt+I** — open / close floating Scene Import (detach if needed; hide keeps float; Dock reattaches as side panel and stays open)
+- Filter presets open: **↑↓** / **Enter** / **D** / **Ctrl+S** / **Esc** / **U** (soft-delete undo)
+- **Enter** — commit draft search to an Include chip
+- **Shift+Enter** — commit draft to Exclude
+- **Esc** (in search) — close search field without clearing chips
+- **Ctrl+Z** — undo clear-all search chips (within 5s)
+
+### Selection
+- **Arrow keys** — move selection in the grid (Shift = range, Ctrl = add)
+- **Enter** / **Space** — apply selection
+- **Ctrl+A** — select all visible items
+- **Delete / Backspace** — delete eligible selection (History: remove from history)
+- Context menu **1–9** — run numbered actions while the menu is open
+- **0–9** — jump to numbered category (same order as the category quick-switch menu)
+
+### Undo / redo
+- **Ctrl+Z** — undo (footer Undo stays pinned; tooltip names next action; also undoes recent History remove / search clear within 5s)
+- **Ctrl+Y** / **Ctrl+Shift+Z** — redo
+- **Ctrl+R** — refresh History browse (History category only)
+
+### Scene Tools (not Creators list)
+- **Ctrl+Shift+K** — toggle Scene Tools
+- **Ctrl+Shift+S** — open / close Strip Scene keep picker
+- While Strip Scene is open: **?** help · **/** filter · **↑↓** nav · **Space** toggle · **←→** expand · **F2** rename · **Enter** strip · **Esc** back
+- Status bar shows sticky modes (Scene Eraser · Scene Tools · Try-On · Import · Cleanup · …); soft toasts append after the mode line. **Esc** exits tool modes listed there.
+
+### Scene Eraser
+- Side-rail eraser / **Ctrl+Shift+E** — point and click to erase scene items; **Esc** exits
+- Pointer popup says **Erase …** (scene edit). Wearable side lists say **Unequip**. Toolbox **Delete** is disk only.
+
+### Try-On
+- Settings → Interaction → **Try-On Mode** (also command palette). Eligible grid applies preview; bar **Keep** / **Revert** / Compare; **Esc** reverts. Next try auto-keeps previous (toast).
+
+### Filters
+- Active browse filters show as chips under the title bar (**Clear all**). Switching category restores that category’s saved filters and toasts when any are active.
 
 ### VR
 - **VR hover tooltips** (Settings) — short hover shows control labels.

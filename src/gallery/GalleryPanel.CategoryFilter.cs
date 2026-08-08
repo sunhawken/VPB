@@ -37,6 +37,7 @@ namespace VPB
             s.BrowseOldVersionsMode = (int)_browseOldVersionsCycle;
             s.BrowseLoadedMode = (int)_browseLoadedMode;
             s.BrowseUnusedMode = (int)_browseUnusedCycle;
+            s.LicenseFilter = currentLicenseFilter ?? "";
             return s;
         }
 
@@ -69,22 +70,56 @@ namespace VPB
             if (_categoryFilterStates.TryGetValue(key, out state) && state != null)
             {
                 ApplyCategoryFilterState(state, restoreUserTagFilter: true);
+                NotifyCategoryFiltersRestored(categoryTitle);
                 return;
             }
 
             string stateJson;
-            if (VpbLocalDatabase.TryLoadCategoryFilterState(PanelId, key, out stateJson))
+            if (TryLoadPersistedCategoryFilterState(key, out stateJson))
             {
                 state = CategoryFilterState.FromJson(stateJson);
                 if (state != null)
                 {
                     _categoryFilterStates[key] = state;
                     ApplyCategoryFilterState(state, restoreUserTagFilter: true);
+                    NotifyCategoryFiltersRestored(categoryTitle);
                     return;
                 }
             }
 
             ClearFiltersForNewCategory();
+        }
+
+        /// <summary>Gulf of evaluation: category switch restored hidden filters — surface in status.</summary>
+        private void NotifyCategoryFiltersRestored(string categoryTitle)
+        {
+            try
+            {
+                if (!HasActiveBrowseFilters()) return;
+                string cat = string.IsNullOrEmpty(categoryTitle) ? "category" : categoryTitle;
+                ShowTemporaryStatus(
+                    string.Format(
+                        VPBTranslation.T(
+                            "gallery.filter.restored_for_category",
+                            "Restored filters for {0}. Clear all in chip bar."),
+                        cat),
+                    2.25f);
+            }
+            catch { }
+        }
+
+        /// <summary>Load filter JSON for this pane; fall back to primary slot so Close/recreate and old single-pane rows still restore.</summary>
+        private bool TryLoadPersistedCategoryFilterState(string catKey, out string stateJson)
+        {
+            stateJson = null;
+            string id = PanelId;
+            if (VpbLocalDatabase.TryLoadCategoryFilterState(id, catKey, out stateJson) && !string.IsNullOrEmpty(stateJson))
+                return true;
+            if (!string.Equals(id, PrimaryPanelId, StringComparison.Ordinal)
+                && VpbLocalDatabase.TryLoadCategoryFilterState(PrimaryPanelId, catKey, out stateJson)
+                && !string.IsNullOrEmpty(stateJson))
+                return true;
+            return false;
         }
 
         /// <param name="restoreUserTagFilter">
@@ -93,7 +128,11 @@ namespace VPB
         /// was from restoring FilterUntagged / FilterByTags without clear affordance).
         /// Pass false only when deliberately wiping user-tag filter while applying other state.
         /// </param>
-        private void ApplyCategoryFilterState(CategoryFilterState state, bool restoreUserTagFilter = true)
+        /// <param name="quietUi">
+        /// When true, apply filter fields for list rebuild but skip chip/button/search chrome updates
+        /// (background filter-randomize).
+        /// </param>
+        private void ApplyCategoryFilterState(CategoryFilterState state, bool restoreUserTagFilter = true, bool quietUi = false)
         {
             // Set search fields directly — RefreshFiles (called after Show returns) will build
             // currentFilteredFiles using these terms. topSearchBaseFiles must be null so that
@@ -101,15 +140,21 @@ namespace VPB
             topSearchBaseFiles = null;
             string restoredSearch = state.NameFilter ?? "";
             AssignNameFilterState(restoredSearch);
-            HydrateTitleSearchChipsFromCurrentFilter();
-            // WithoutNotify: assigning .text fires SetNameFilter and can schedule a second SQL refresh.
-            // Chip mode: field stays empty (draft); live mode: show restored string.
-            string fieldText = HasTitleSearchChips() ? "" : restoredSearch;
-            try { SetTitleSearchInputTextWithoutNotify(titleSearchInput, fieldText, _titleBarSearchOnValueChanged); } catch { }
+            if (!quietUi)
+            {
+                HydrateTitleSearchChipsFromCurrentFilter();
+                // WithoutNotify: assigning .text fires SetNameFilter and can schedule a second SQL refresh.
+                // Chip mode: field stays empty (draft); live mode: show restored string.
+                string fieldText = HasTitleSearchChips() ? "" : restoredSearch;
+                try { SetTitleSearchInputTextWithoutNotify(titleSearchInput, fieldText, _titleBarSearchOnValueChanged); } catch { }
+            }
 
             currentCreator = state.Creator ?? "";
             _currentCreatorSetSrc = null;
-            try { UpdateTitleCreatorButtonVisual(); } catch { }
+            if (!quietUi)
+            {
+                try { UpdateTitleCreatorButtonVisual(); } catch { }
+            }
 
             activeTags.Clear();
             if (state.Tags != null)
@@ -176,8 +221,11 @@ namespace VPB
             if (state.FileSortState != null)
             {
                 SaveSortState("Files", state.FileSortState);
-                try { UpdateSortButtonText(fileSortTypeText, fileSortDirText, state.FileSortState); } catch { }
-                try { SyncRatingSortToggleState(); } catch { }
+                if (!quietUi)
+                {
+                    try { UpdateSortButtonText(fileSortTypeText, fileSortDirText, state.FileSortState); } catch { }
+                    try { SyncRatingSortToggleState(); } catch { }
+                }
             }
 
             _browseHiddenCycle = ClampBrowseFilterCycle(state.BrowseHiddenMode);
@@ -185,13 +233,16 @@ namespace VPB
             _browseOldVersionsCycle = ClampBrowseFilterCycle(state.BrowseOldVersionsMode);
             _browseLoadedMode = ClampBrowseLoadedMode(state.BrowseLoadedMode);
             _browseUnusedCycle = ClampBrowseFilterCycle(state.BrowseUnusedMode);
+            currentLicenseFilter = state.LicenseFilter ?? "";
             try { SyncShowHiddenPackagesFromCycle(); } catch { }
             try { SyncHideOldVersionsFromCycle(); } catch { }
             try { MigrateLegacyExclusiveFileSortIfNeeded(); } catch { }
-            try { UpdateGlobalSourceFilterButtonLabel(); } catch { }
-
-            try { SyncUserTagFilterModeToggleVisualsEverywhere(); } catch { }
-            SyncBrowseFilterChipChrome();
+            if (!quietUi)
+            {
+                try { UpdateGlobalSourceFilterButtonLabel(); } catch { }
+                try { SyncUserTagFilterModeToggleVisualsEverywhere(); } catch { }
+                SyncBrowseFilterChipChrome();
+            }
         }
 
         private void ClearFiltersForNewCategory()
@@ -248,6 +299,8 @@ namespace VPB
                 _browseUnusedCycle = BrowseFilterCycle.Off;
                 _browseUnusedSavedSort = null;
             }
+            currentLicenseFilter = "";
+            CancelLicenseFilterHydrate();
             try { UpdateGlobalSourceFilterButtonLabel(); } catch { }
             SyncBrowseFilterChipChrome();
         }

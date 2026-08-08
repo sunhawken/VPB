@@ -130,6 +130,17 @@ namespace VPB
                 float catH = GalleryUiDesignTokens.TitleBarChipRef * s;
                 _categoryQuickChromeRootRT.sizeDelta = new Vector2(catW, catH);
                 _categoryQuickChromeRootRT.anchoredPosition = new Vector2(leftInset, 0f);
+                // Relaxed list width like QuickFilters; never narrower than labeled chrome.
+                if (_categoryQuickMenuOuterRT != null)
+                {
+                    float menuW = Mathf.Max(
+                        GalleryUiDesignTokens.PopupMenuPanelWidthRef * s,
+                        catLabeledW);
+                    Vector2 sd = _categoryQuickMenuOuterRT.sizeDelta;
+                    _categoryQuickMenuOuterRT.sizeDelta = new Vector2(menuW, sd.y);
+                    Vector2 ap = _categoryQuickMenuOuterRT.anchoredPosition;
+                    _categoryQuickMenuOuterRT.anchoredPosition = new Vector2(leftInset, ap.y);
+                }
             }
 
             RectTransform langRT = null;

@@ -32,23 +32,480 @@ namespace VPB
             UpdateSortButtonText(fileSortTypeText, fileSortDirText, st);
         }
 
+        private bool NameFilterUsesRatingStatus()
+        {
+            try
+            {
+                if (nameFilterQuery == null || nameFilterQuery.IsEmpty) return false;
+                return nameFilterQuery.HasFlag(GallerySearchQuery.StatusFlags.Starred)
+                    || nameFilterQuery.HasFlag(GallerySearchQuery.StatusFlags.Unrated);
+            }
+            catch { return false; }
+        }
+
+        private bool IsLiveRatingFilterArmed()
+        {
+            return HasRatingPresenceFilter()
+                || !string.IsNullOrEmpty(currentRatingFilter)
+                || NameFilterUsesRatingStatus();
+        }
+
+        /// <summary>Fail-soft star rating read (treat missing/throw as 0 / unrated).</summary>
+        private static int GetEntryStarRatingOrZero(FileEntry entry)
+        {
+            if (entry == null) return 0;
+            int r = 0;
+            try { r = RatingsManager.Instance != null ? RatingsManager.Instance.GetRating(entry) : 0; }
+            catch { r = 0; }
+            return r;
+        }
+
+        /// <summary>Star-count tab filter (Filter menu). Empty filter = pass.</summary>
+        private bool PassesStarCountFilter(int rating)
+        {
+            if (string.IsNullOrEmpty(currentRatingFilter)) return true;
+            if (currentRatingFilter == "All Ratings") return rating > 0;
+            if (currentRatingFilter == "5 Stars") return rating == 5;
+            if (currentRatingFilter == "4 Stars") return rating == 4;
+            if (currentRatingFilter == "3 Stars") return rating == 3;
+            if (currentRatingFilter == "2 Stars") return rating == 2;
+            if (currentRatingFilter == "1 Star") return rating == 1;
+            if (currentRatingFilter == "No Ratings") return rating == 0;
+            return true;
+        }
+
+        /// <summary>
+        /// Title-bar ★ presence + star-count tab (single GetRating). Used by <see cref="PassesFilters"/>
+        /// including History so ★ chrome matches visible rows.
+        /// </summary>
+        private bool PassesLiveStarFilters(FileEntry entry)
+        {
+            if (_ratingPresenceFilterMode == RatingPresenceFilterMode.Off
+                && string.IsNullOrEmpty(currentRatingFilter))
+                return true;
+
+            int r = GetEntryStarRatingOrZero(entry);
+            if (!PassesStarCountFilter(r)) return false;
+            if (_ratingPresenceFilterMode == RatingPresenceFilterMode.RatedOnly)
+                return r > 0;
+            if (_ratingPresenceFilterMode == RatingPresenceFilterMode.UnratedOnly)
+                return r <= 0;
+            return true;
+        }
+
+        /// <summary>
+        /// After item ratings mutate: prune rows that fail rating filters (Not rated / Rated only / star tab / search),
+        /// else rebind badge visuals. Skips full <see cref="RefreshFiles"/> (same pattern as user-tag prune).
+        /// Selection moves to a surviving neighbor before prune so detail strip stays populated.
+        /// Prefer overloads that pass mutated rows — avoids O(n) PassesFilters over whole grid.
+        /// </summary>
+        internal void AfterItemRatingsMutated()
+        {
+            AfterItemRatingsMutatedEntries(null);
+        }
+
+        internal void AfterItemRatingsMutated(FileEntry mutated)
+        {
+            _ratingMutatedScratch.Clear();
+            if (mutated != null) _ratingMutatedScratch.Add(mutated);
+            AfterItemRatingsMutatedEntries(_ratingMutatedScratch);
+        }
+
+        internal void AfterItemRatingsMutated(IList<FileEntry> mutated)
+        {
+            AfterItemRatingsMutatedEntries(mutated);
+        }
+
+        internal void AfterItemRatingsMutatedByUid(string uid)
+        {
+            _ratingMutatedScratch.Clear();
+            if (!string.IsNullOrEmpty(uid) && currentFilteredFiles != null)
+            {
+                for (int i = 0; i < currentFilteredFiles.Count; i++)
+                {
+                    FileEntry fe = currentFilteredFiles[i];
+                    if (fe == null) continue;
+                    string feUid = null;
+                    try { feUid = fe.Uid; } catch { feUid = null; }
+                    if (!string.IsNullOrEmpty(feUid)
+                        && string.Equals(feUid, uid, StringComparison.OrdinalIgnoreCase))
+                        _ratingMutatedScratch.Add(fe);
+                }
+            }
+            AfterItemRatingsMutatedEntries(_ratingMutatedScratch);
+        }
+
+        private void AfterItemRatingsMutatedEntries(IList<FileEntry> mutatedHint)
+        {
+            if (IsLiveRatingFilterArmed() && TryPruneVisibleGridAfterRatingChange(mutatedHint))
+            {
+                if (recyclingGrid != null)
+                {
+                    try
+                    {
+                        recyclingGrid.SetItemCount(currentFilteredFiles != null ? currentFilteredFiles.Count : 0);
+                        recyclingGrid.Refresh();
+                    }
+                    catch { }
+                }
+
+                try
+                {
+                    bool historyBrowse = activeContentType == ContentType.History;
+                    string navKey = GetCurrentSelectionAnchorIdentityKey(historyBrowse);
+                    int idx = FindIndexBySelectionIdentity(currentFilteredFiles, navKey, historyBrowse);
+                    if (idx >= 0)
+                    {
+                        _detailStripScrubIndex = idx;
+                        if (recyclingGrid != null) recyclingGrid.EnsureItemVisible(idx);
+                    }
+                    else
+                        _detailStripScrubIndex = -1;
+                }
+                catch { }
+
+                try { RefreshSelectionVisuals(); } catch { }
+                try { UpdatePaginationText(); } catch { }
+                try { UpdateEmptyGridState(); } catch { }
+                try { _detailStripCacheKey = ""; DetailStripRefresh(); } catch { }
+                return;
+            }
+
+            try { RefreshVisibleGridVisualsOnly(); } catch { }
+        }
+
+        /// <summary>
+        /// Drop visible rows that no longer pass rating presence / star / search-status filters.
+        /// Only evaluates mutated hints (or selection fallback) — not the full grid.
+        /// Keeps filter/search base snapshots intact so clearing ★ can restore rows without RefreshFiles.
+        /// </summary>
+        private bool TryPruneVisibleGridAfterRatingChange(IList<FileEntry> mutatedHint)
+        {
+            if (currentFilteredFiles == null || currentFilteredFiles.Count == 0) return false;
+
+            bool historyBrowse = activeContentType == ContentType.History;
+            if (_ratingPruneRemoveRefs == null) _ratingPruneRemoveRefs = new HashSet<FileEntry>();
+            else _ratingPruneRemoveRefs.Clear();
+            if (_ratingPruneRemoveKeys == null)
+                _ratingPruneRemoveKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            else _ratingPruneRemoveKeys.Clear();
+
+            HashSet<FileEntry> removeRefs = _ratingPruneRemoveRefs;
+            HashSet<string> removeKeys = _ratingPruneRemoveKeys;
+
+            IList<FileEntry> hints = mutatedHint;
+            if (hints == null || hints.Count == 0)
+                hints = selectedFiles;
+
+            if (hints == null || hints.Count == 0) return false;
+
+            for (int h = 0; h < hints.Count; h++)
+            {
+                FileEntry hint = hints[h];
+                if (hint == null) continue;
+
+                // Resolve to the list instance (hint may be a different FileEntry with same identity).
+                string hintKey = GetSelectionIdentityKey(hint, historyBrowse);
+                FileEntry visible = null;
+                if (!string.IsNullOrEmpty(hintKey))
+                {
+                    int idx = FindIndexBySelectionIdentity(currentFilteredFiles, hintKey, historyBrowse);
+                    if (idx >= 0) visible = currentFilteredFiles[idx];
+                }
+                if (visible == null)
+                {
+                    // Same-ref fast path when identity key empty / not found.
+                    for (int i = 0; i < currentFilteredFiles.Count; i++)
+                    {
+                        if (ReferenceEquals(currentFilteredFiles[i], hint))
+                        {
+                            visible = hint;
+                            break;
+                        }
+                    }
+                }
+                if (visible == null) continue;
+
+                bool keep;
+                try { keep = PassesFilters(visible, true); }
+                catch { keep = true; }
+                if (keep) continue;
+
+                removeRefs.Add(visible);
+                string k = GetSelectionIdentityKey(visible, historyBrowse);
+                if (!string.IsNullOrEmpty(k)) removeKeys.Add(k);
+            }
+
+            if (removeRefs.Count == 0) return false;
+
+            try { ReselectBeforeRatingPrune(removeRefs, removeKeys, historyBrowse); } catch { }
+
+            // Visible + selection only. Do not hollow topSearchBaseFiles / filterSearchBaseFiles —
+            // clearing ★ / presence rebuilds the view from those bases.
+            RemoveFileEntriesFromLists(currentFilteredFiles, removeRefs);
+            RemoveFileEntriesFromLists(lastFilteredFiles, removeRefs);
+            try { InvalidateGalleryPreHideFileListSnapshot(); } catch { }
+            RemoveFileEntriesFromLists(selectedFiles, removeRefs);
+            try { PruneSelectedFilePathsAfterRatingPrune(removeKeys); } catch { }
+            return true;
+        }
+
+        private bool IsFileRemovedForRatingPrune(
+            FileEntry fe,
+            HashSet<FileEntry> removeRefs,
+            HashSet<string> removeKeys,
+            bool historyBrowse)
+        {
+            if (fe == null) return false;
+            if (removeRefs != null && removeRefs.Contains(fe)) return true;
+            if (removeKeys == null || removeKeys.Count == 0) return false;
+            string k = GetSelectionIdentityKey(fe, historyBrowse);
+            return !string.IsNullOrEmpty(k) && removeKeys.Contains(k);
+        }
+
+        /// <summary>
+        /// Before prune: keep surviving multi-select, or move single/empty selection to nearest survivor
+        /// (prefer next, else previous). Last surviving item → clear selection.
+        /// </summary>
+        private void ReselectBeforeRatingPrune(
+            HashSet<FileEntry> removeRefs,
+            HashSet<string> removeKeys,
+            bool historyBrowse)
+        {
+            if (removeRefs == null || removeRefs.Count == 0) return;
+            if (currentFilteredFiles == null || currentFilteredFiles.Count == 0) return;
+
+            bool anySelectedRemoved = false;
+            int firstRemovedSelIdx = -1;
+            int anchorRemovedIdx = -1;
+            _ratingPruneSurvivingSelected.Clear();
+            List<FileEntry> survivingSelected = _ratingPruneSurvivingSelected;
+
+            string anchorKey = GetCurrentSelectionAnchorIdentityKey(historyBrowse);
+            if (!string.IsNullOrEmpty(anchorKey)
+                && removeKeys != null
+                && removeKeys.Contains(anchorKey))
+            {
+                anchorRemovedIdx = FindIndexBySelectionIdentity(currentFilteredFiles, anchorKey, historyBrowse);
+            }
+
+            if (selectedFiles != null)
+            {
+                for (int i = 0; i < selectedFiles.Count; i++)
+                {
+                    FileEntry sel = selectedFiles[i];
+                    if (sel == null) continue;
+                    if (IsFileRemovedForRatingPrune(sel, removeRefs, removeKeys, historyBrowse))
+                    {
+                        anySelectedRemoved = true;
+                        int idx = FindIndexBySelectionIdentity(
+                            currentFilteredFiles,
+                            GetSelectionIdentityKey(sel, historyBrowse),
+                            historyBrowse);
+                        if (idx >= 0 && (firstRemovedSelIdx < 0 || idx < firstRemovedSelIdx))
+                            firstRemovedSelIdx = idx;
+                    }
+                    else
+                        survivingSelected.Add(sel);
+                }
+            }
+
+            if (!anySelectedRemoved) return;
+
+            try { DetailStripUnlockAfterExternalSelectionChange(); } catch { }
+
+            // Partial multi-select survival: keep survivors only.
+            if (survivingSelected.Count > 0)
+            {
+                selectedFiles.Clear();
+                selectedFilePaths.Clear();
+                for (int i = 0; i < survivingSelected.Count; i++)
+                    AddFileToSelection(survivingSelected[i], historyBrowse);
+
+                FileEntry anchorKeep = survivingSelected[0];
+                if (!string.IsNullOrEmpty(anchorKey))
+                {
+                    for (int i = 0; i < survivingSelected.Count; i++)
+                    {
+                        if (string.Equals(
+                            GetSelectionIdentityKey(survivingSelected[i], historyBrowse),
+                            anchorKey,
+                            StringComparison.OrdinalIgnoreCase))
+                        {
+                            anchorKeep = survivingSelected[i];
+                            break;
+                        }
+                    }
+                }
+                SetSelectionAnchor(anchorKeep, historyBrowse);
+                selectedPath = historyBrowse
+                    ? GetSelectionIdentityKey(anchorKeep, true)
+                    : anchorKeep.Path;
+                return;
+            }
+
+            // All selected rows leave the filter — pick nearest survivor.
+            int pivot = anchorRemovedIdx >= 0 ? anchorRemovedIdx : firstRemovedSelIdx;
+            if (pivot < 0)
+            {
+                // Rated an unselected? Should not reach here (anySelectedRemoved). Fallback: first remove.
+                for (int i = 0; i < currentFilteredFiles.Count; i++)
+                {
+                    if (IsFileRemovedForRatingPrune(currentFilteredFiles[i], removeRefs, removeKeys, historyBrowse))
+                    {
+                        pivot = i;
+                        break;
+                    }
+                }
+            }
+
+            FileEntry next = FindNearestSurvivorForRatingPrune(
+                currentFilteredFiles, removeRefs, removeKeys, pivot, historyBrowse);
+
+            selectedFiles.Clear();
+            selectedFilePaths.Clear();
+
+            if (next == null)
+            {
+                selectionAnchorPath = null;
+                selectionAnchorIdentityKey = null;
+                selectedPath = null;
+                _detailStripScrubIndex = -1;
+                return;
+            }
+
+            AddFileToSelection(next, historyBrowse);
+            SetSelectionAnchor(next, historyBrowse);
+            selectedPath = historyBrowse ? GetSelectionIdentityKey(next, true) : next.Path;
+        }
+
+        private FileEntry FindNearestSurvivorForRatingPrune(
+            List<FileEntry> files,
+            HashSet<FileEntry> removeRefs,
+            HashSet<string> removeKeys,
+            int pivotIndex,
+            bool historyBrowse)
+        {
+            if (files == null || files.Count == 0) return null;
+            int n = files.Count;
+            if (pivotIndex < 0) pivotIndex = 0;
+            if (pivotIndex >= n) pivotIndex = n - 1;
+
+            for (int i = pivotIndex + 1; i < n; i++)
+            {
+                FileEntry fe = files[i];
+                if (fe != null && !IsFileRemovedForRatingPrune(fe, removeRefs, removeKeys, historyBrowse))
+                    return fe;
+            }
+            for (int i = pivotIndex - 1; i >= 0; i--)
+            {
+                FileEntry fe = files[i];
+                if (fe != null && !IsFileRemovedForRatingPrune(fe, removeRefs, removeKeys, historyBrowse))
+                    return fe;
+            }
+            return null;
+        }
+
+        private void PruneSelectedFilePathsAfterRatingPrune(HashSet<string> removeKeys)
+        {
+            if (selectedFilePaths == null || selectedFilePaths.Count == 0) return;
+            if (removeKeys == null || removeKeys.Count == 0) return;
+
+            // selectedFilePaths may use Path while removeKeys use identity — rebuild from selectedFiles.
+            selectedFilePaths.Clear();
+            if (selectedFiles == null) return;
+            bool historyBrowse = activeContentType == ContentType.History;
+            for (int i = 0; i < selectedFiles.Count; i++)
+            {
+                FileEntry f = selectedFiles[i];
+                if (f == null) continue;
+                string addKey = !string.IsNullOrEmpty(f.Path) ? f.Path : (f.Uid ?? "");
+                if (string.IsNullOrEmpty(addKey)) continue;
+                if (removeKeys.Contains(addKey)) continue;
+                string idKey = GetSelectionIdentityKey(f, historyBrowse);
+                if (!string.IsNullOrEmpty(idKey) && removeKeys.Contains(idKey)) continue;
+                selectedFilePaths.Add(addKey);
+            }
+        }
+
+        private bool HasRatingPresenceFilter()
+        {
+            return _ratingPresenceFilterMode != RatingPresenceFilterMode.Off;
+        }
+
+        private string ResolveRatingPresenceFilterLabel()
+        {
+            if (_ratingPresenceFilterMode == RatingPresenceFilterMode.RatedOnly)
+                return VPBTranslation.T("gallery.title.rated_only", "Rated only");
+            if (_ratingPresenceFilterMode == RatingPresenceFilterMode.UnratedOnly)
+                return VPBTranslation.T("gallery.title.unrated_only", "Not rated");
+            return VPBTranslation.T("gallery.title.rated_only", "Rated only");
+        }
+
+        private string BuildRatingPresenceFilterTooltip()
+        {
+            if (_ratingPresenceFilterMode == RatingPresenceFilterMode.RatedOnly)
+            {
+                return VPBTranslation.T(
+                    "gallery.tooltip.rated_only_on",
+                    "Rated only — click again for Not rated (VR OK). Right-click clears.");
+            }
+            if (_ratingPresenceFilterMode == RatingPresenceFilterMode.UnratedOnly)
+            {
+                return VPBTranslation.T(
+                    "gallery.tooltip.unrated_only_on",
+                    "Not rated — click again to clear. Right-click clears.");
+            }
+            return VPBTranslation.T(
+                "gallery.tooltip.rated_only",
+                "Cycle: Rated only → Not rated → Off. Right-click clears.");
+        }
+
+        /// <summary>
+        /// Primary click cycles Off → RatedOnly → UnratedOnly → Off.
+        /// VR laser only fires left-click — full cycle must live on primary.
+        /// </summary>
         private void ToggleRatingSort()
         {
-            isRatingSortToggleEnabled = !isRatingSortToggleEnabled;
-            ApplyRatingSortFilterChange();
+            if (_ratingPresenceFilterMode == RatingPresenceFilterMode.Off)
+                _ratingPresenceFilterMode = RatingPresenceFilterMode.RatedOnly;
+            else if (_ratingPresenceFilterMode == RatingPresenceFilterMode.RatedOnly)
+                _ratingPresenceFilterMode = RatingPresenceFilterMode.UnratedOnly;
+            else
+                _ratingPresenceFilterMode = RatingPresenceFilterMode.Off;
+            ApplyRatingSortFilterChange(showStatus: true);
         }
 
-        /// <summary>Right-click on ★ while rated-only filter active: turn filter off without toggling on.</summary>
+        /// <summary>Right-click on ★ while armed: clear without advancing cycle.</summary>
         private void DisableRatingSortFilterIfEnabled()
         {
-            if (!isRatingSortToggleEnabled) return;
-            isRatingSortToggleEnabled = false;
-            ApplyRatingSortFilterChange();
+            if (_ratingPresenceFilterMode == RatingPresenceFilterMode.Off) return;
+            _ratingPresenceFilterMode = RatingPresenceFilterMode.Off;
+            ApplyRatingSortFilterChange(showStatus: true);
         }
 
-        private void ApplyRatingSortFilterChange()
+        private void SetRatingPresenceFilterMode(RatingPresenceFilterMode mode, bool refresh, bool showStatus)
+        {
+            if (_ratingPresenceFilterMode == mode)
+            {
+                if (showStatus) ShowRatingPresenceFilterStatus();
+                return;
+            }
+            _ratingPresenceFilterMode = mode;
+            if (refresh) ApplyRatingSortFilterChange(showStatus);
+            else
+            {
+                SyncRatingSortToggleState();
+                try { SyncBrowseFilterChipChrome(); } catch { }
+                if (showStatus) ShowRatingPresenceFilterStatus();
+            }
+        }
+
+        private void ApplyRatingSortFilterChange(bool showStatus = false)
         {
             SyncRatingSortToggleState();
+            try { SyncBrowseFilterChipChrome(); } catch { }
+            if (showStatus) ShowRatingPresenceFilterStatus();
             if (IsFilterActive)
             {
                 try { ApplySearchWithinFilter(nameFilter); } catch { }
@@ -57,25 +514,47 @@ namespace VPB
             RefreshFiles();
         }
 
+        private void ShowRatingPresenceFilterStatus()
+        {
+            string msg;
+            if (_ratingPresenceFilterMode == RatingPresenceFilterMode.RatedOnly)
+                msg = VPBTranslation.T("gallery.status.rated_only", "Filter: Rated only");
+            else if (_ratingPresenceFilterMode == RatingPresenceFilterMode.UnratedOnly)
+                msg = VPBTranslation.T("gallery.status.unrated_only", "Filter: Not rated");
+            else
+                msg = VPBTranslation.T("gallery.status.rating_filter_off", "Filter: Rating off");
+            try { ShowTemporaryStatus(msg, 1.6f); } catch { }
+        }
+
         private void SyncRatingSortToggleState()
         {
+            bool rated = _ratingPresenceFilterMode == RatingPresenceFilterMode.RatedOnly;
+            bool unrated = _ratingPresenceFilterMode == RatingPresenceFilterMode.UnratedOnly;
+            bool armed = rated || unrated;
+
             if (ratingSortToggleBtnText != null)
             {
-                ratingSortToggleBtnText.color = isRatingSortToggleEnabled ? Color.green : Color.white;
+                if (rated) ratingSortToggleBtnText.color = Color.green;
+                else if (unrated) ratingSortToggleBtnText.color = ColorUnratedFilterLabel;
+                else ratingSortToggleBtnText.color = Color.white;
             }
             if (ratingSortIconImage != null)
             {
-                Sprite target = isRatingSortToggleEnabled ? ratingStarOffSprite : ratingStarNormalSprite;
+                Sprite target = armed ? ratingStarOffSprite : ratingStarNormalSprite;
                 if (target != null) ratingSortIconImage.sprite = target;
+                if (armed)
+                    ratingSortIconImage.color = rated ? Color.white : ColorUnratedFilterIcon;
+                else
+                    ratingSortIconImage.color = Color.white;
             }
             if (ratingSortToggleBtn != null)
             {
                 Image backdrop = ratingSortToggleBtn.GetComponent<Image>();
                 if (backdrop != null)
                 {
-                    backdrop.color = isRatingSortToggleEnabled
-                        ? ColorHistoryAccent
-                        : UI.ChromeDark;
+                    if (rated) backdrop.color = ColorHistoryAccent;
+                    else if (unrated) backdrop.color = ColorUnratedFilterAccent;
+                    else backdrop.color = UI.ChromeDark;
                 }
             }
         }
@@ -283,6 +762,12 @@ namespace VPB
                     ? VPBTranslation.T("gallery.sort.full.count_low_high", "Count (low→high)")
                     : VPBTranslation.T("gallery.sort.full.count_high_low", "Count (high→low)");
             }
+            if (type == SortType.Rating)
+            {
+                return dir == SortDirection.Ascending
+                    ? VPBTranslation.T("gallery.sort.full.creator_rating_low_high", "Rating (low→high)")
+                    : VPBTranslation.T("gallery.sort.full.creator_rating_high_low", "Rating (high→low)");
+            }
             return type.ToString() + " " + (dir == SortDirection.Ascending ? "↑" : "↓");
         }
 
@@ -318,9 +803,29 @@ namespace VPB
             SortState current = GetSortState(context);
             if (current == null) current = new SortState(SortType.Name, SortDirection.Ascending);
 
-            // Side panes: offer explicit 4 choices (Name asc/desc, Count asc/desc) when valid.
-            SortType[] optTypes = new SortType[] { SortType.Name, SortType.Name, SortType.Count, SortType.Count };
-            SortDirection[] optDirs = new SortDirection[] { SortDirection.Ascending, SortDirection.Descending, SortDirection.Ascending, SortDirection.Descending };
+            // Side panes: Name/Count asc/desc. Creator also gets Rating + rated-only filter toggle.
+            bool isCreator = string.Equals(context, "Creator", StringComparison.Ordinal);
+            SortType[] optTypes;
+            SortDirection[] optDirs;
+            if (isCreator)
+            {
+                optTypes = new SortType[]
+                {
+                    SortType.Name, SortType.Name, SortType.Count, SortType.Count,
+                    SortType.Rating, SortType.Rating
+                };
+                optDirs = new SortDirection[]
+                {
+                    SortDirection.Ascending, SortDirection.Descending,
+                    SortDirection.Ascending, SortDirection.Descending,
+                    SortDirection.Ascending, SortDirection.Descending
+                };
+            }
+            else
+            {
+                optTypes = new SortType[] { SortType.Name, SortType.Name, SortType.Count, SortType.Count };
+                optDirs = new SortDirection[] { SortDirection.Ascending, SortDirection.Descending, SortDirection.Ascending, SortDirection.Descending };
+            }
             for (int oi = 0; oi < optTypes.Length && oi < optDirs.Length; oi++)
             {
                 SortType optType = optTypes[oi];
@@ -336,7 +841,7 @@ namespace VPB
                     sidePaneSortMenuPanelGO, 228, 34, label, 14, isCurrent,
                     () =>
                     {
-                        if (SupportsSidePaneFourModeSort(context))
+                        if (SupportsSidePaneFourModeSort(context) && capturedType != SortType.Rating)
                             ApplySidePaneFourModeSort(context, capturedType, capturedDir);
                         else
                         {
@@ -344,8 +849,24 @@ namespace VPB
                             st.Type = capturedType;
                             st.Direction = capturedDir;
                             SaveSortState(context, st);
+                            try { SyncSidePaneTopSortButtonVisuals(); } catch { }
                             UpdateTabs();
                         }
+                        CloseSidePaneSortMenu();
+                    },
+                    GalleryUiDesignTokens.PopupMenuRowHeightCompactRef);
+            }
+
+            if (isCreator)
+            {
+                bool ratedOn = creatorRatedOnlyFilter;
+                string ratedLabel = (ratedOn ? "\u2713  " : "    ")
+                    + VPBTranslation.T("gallery.sort.full.creator_rated_only", "Rated only (filter)");
+                UI.AddPopupMenuRow(
+                    sidePaneSortMenuPanelGO, 228, 34, ratedLabel, 14, ratedOn,
+                    () =>
+                    {
+                        ToggleCreatorRatedOnlyFilter();
                         CloseSidePaneSortMenu();
                     },
                     GalleryUiDesignTokens.PopupMenuRowHeightCompactRef);
@@ -528,7 +1049,11 @@ namespace VPB
                     // Prefer-sort still used by Always-loaded / Unused Filter cycles (not shown in sort menu).
                     || type == SortType.AutoInstall;
             }
-            else if (context == "Category" || context == "Creator" || context == "Path" || context == "UserTags" || context == "UserTagsApplied" || context == "Status" || context == "Tags" || context == "SceneSource" || context == "DetailStripTagMenu")
+            else if (context == "Creator")
+            {
+                return type == SortType.Name || type == SortType.Count || type == SortType.Rating;
+            }
+            else if (context == "Category" || context == "Path" || context == "UserTags" || context == "UserTagsApplied" || context == "Status" || context == "Tags" || context == "SceneSource" || context == "DetailStripTagMenu")
             {
                 return type == SortType.Name || type == SortType.Count;
             }
@@ -636,13 +1161,13 @@ namespace VPB
         private void SyncSidePaneFourModeSortButtonVisual(Image backdrop, Image iconImg, Text legacyText, SortState st, bool iconMode)
         {
             if (backdrop == null) return;
-            if (iconMode && sceneSourceSortModeSprites != null && iconImg != null)
+            int idx = TryGetSidePaneFourModeIndex(st);
+            // Rating (and any non-4-mode sort) uses text — do not fake Name A→Z icon.
+            if (iconMode && idx >= 0 && sceneSourceSortModeSprites != null && iconImg != null)
             {
                 if (legacyText != null) legacyText.gameObject.SetActive(false);
                 iconImg.gameObject.SetActive(true);
-                int idx = TryGetSidePaneFourModeIndex(st);
-                int spIdx = idx >= 0 ? idx : 0;
-                Sprite sp = spIdx >= 0 && spIdx < sceneSourceSortModeSprites.Length ? sceneSourceSortModeSprites[spIdx] : null;
+                Sprite sp = idx < sceneSourceSortModeSprites.Length ? sceneSourceSortModeSprites[idx] : null;
                 if (sp != null)
                 {
                     iconImg.sprite = sp;
@@ -650,7 +1175,7 @@ namespace VPB
                 }
                 else
                     iconImg.enabled = false;
-                backdrop.color = idx >= 0 ? SceneSourceSortBtnActive : SceneSourceSortBtnIdle;
+                backdrop.color = SceneSourceSortBtnActive;
             }
             else
             {
@@ -664,7 +1189,9 @@ namespace VPB
                     legacyText.gameObject.SetActive(true);
                     if (st != null) UpdateSortButtonText(legacyText, st);
                 }
-                backdrop.color = SceneSourceSortBtnIdle;
+                backdrop.color = (st != null && st.Type == SortType.Rating)
+                    ? SceneSourceSortBtnActive
+                    : SceneSourceSortBtnIdle;
             }
         }
 

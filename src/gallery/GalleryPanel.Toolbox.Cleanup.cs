@@ -1383,10 +1383,15 @@ namespace VPB
 
                 if (_benchPickModeActive)
                     BenchAbortPickMode(reopenModal: false);
+                if (_stripKeepSubScenePickActive)
+                    StripKeepAbortSubScenePickMode(reopenStrip: false);
 
                 cleanupModeActive = true;
                 cleanupFilterMode = 0;
+                try { RefreshModeAmbientChrome(); } catch { }
                 LogUtil.LogWarning("[VPB] Cleanup(list) open: starting scan...");
+
+                try { if (creatorModeActive || creatorModeStripBusy) ExitCreatorMode(force: true); } catch { }
 
                 try { EnsureTemporaryTaskListLayoutSession(); } catch { }
 
@@ -1426,6 +1431,7 @@ namespace VPB
             cleanupStaleBucketMode = 0;
             cleanupCandidatesAll.Clear();
             cleanupCandidateByPath.Clear();
+            try { RefreshModeAmbientChrome(); } catch { }
 
             if (cleanupSideHostIsLeft)
             {

@@ -109,8 +109,9 @@ namespace VPB
             if (footerPerfMinusBtn != null) into.Add(footerPerfMinusBtn);
             if (footerPerfToggleBtn != null) into.Add(footerPerfToggleBtn);
             if (footerHubBtnGO != null) into.Add(footerHubBtnGO);
+            if (footerCommandPaletteBtnGO != null) into.Add(footerCommandPaletteBtnGO);
+            // Redo may collapse; Undo stays pinned (never added) for recovery Fitts path.
             if (footerRedoBtnGO != null) into.Add(footerRedoBtnGO);
-            if (footerUndoBtnGO != null) into.Add(footerUndoBtnGO);
         }
 
         private int ComputeFooterOverflowLayoutSig(float footerW, float s)
@@ -143,7 +144,7 @@ namespace VPB
             return count * chip + (count - 1) * gap;
         }
 
-        private float EstimateFooterCenterMinWidth(float chip, float gap, float s)
+        private float EstimateFooterCenterChromeWidthWithoutSideButtons(float chip, float gap, float s)
         {
             int perfN = 0;
             if (footerPerfToggleBtn != null && footerPerfToggleBtn.activeSelf) perfN++;
@@ -156,12 +157,19 @@ namespace VPB
                 w += gap + 180f * s;
             if (footerFilterModeSpacerGO != null && footerFilterModeSpacerGO.activeSelf)
                 w += 12f * s;
+            return w;
+        }
+
+        private float EstimateFooterCenterMinWidth(float chip, float gap, float s)
+        {
+            float w = EstimateFooterCenterChromeWidthWithoutSideButtons(chip, gap, s);
+            // Top dock: side strip + quality share CenterSection — reserve both (not Max).
             if (IsFixedTopDockMode() && !isCollapsed && _footerSideButtonsGroupRT != null && _footerSideButtonsGroupGO != null
                 && _footerSideButtonsGroupGO.activeSelf)
             {
                 float sideW = _footerSideButtonsGroupRT.rect.width;
                 if (sideW < 1f) sideW = _footerSideButtonsGroupRT.sizeDelta.x;
-                if (sideW > 1f) w = Mathf.Max(w, sideW);
+                if (sideW > 1f) w += (w > 0f ? gap : 0f) + sideW;
             }
             return w;
         }
@@ -189,6 +197,9 @@ namespace VPB
                     n++;
                     continue;
                 }
+                // Top-dock side strip: counted via EstimateFooterCenterMinWidth — skip if under CenterSection.
+                if (ch.name == "SideButtonsGroup")
+                    continue;
                 float cw = ch.sizeDelta.x;
                 if (cw < 1f) cw = ch.rect.width;
                 if (cw < 1f) cw = chipFallback;
@@ -377,17 +388,23 @@ namespace VPB
                     }, icon: icon,
                     tipKey: "gallery.tooltip.hub", tipDefault: "Hub browse / dev Hub panel");
             }
+            else if (go == footerCommandPaletteBtnGO)
+            {
+                AddFooterOverflowMenuRow(panel, VPBTranslation.T("gallery.footer.overflow_command_palette", "Command palette"),
+                    () => { CloseFooterOverflowMenu(); ToggleCommandPalette(); }, icon: icon,
+                    tipKey: "gallery.tooltip.command_palette", tipDefault: "Command palette (Ctrl+Shift+P)");
+            }
             else if (go == footerUndoBtnGO)
             {
                 AddFooterOverflowMenuRow(panel, VPBTranslation.T("gallery.footer.overflow_undo", "Undo"),
                     () => { CloseFooterOverflowMenu(); Undo(); }, icon: icon,
-                    tipKey: "gallery.tooltip.undo", tipDefault: "Undo last change");
+                    tipKey: "gallery.tooltip.undo", tipDefault: "Undo last change (Ctrl+Z)");
             }
             else if (go == footerRedoBtnGO)
             {
                 AddFooterOverflowMenuRow(panel, VPBTranslation.T("gallery.footer.overflow_redo", "Redo"),
                     () => { CloseFooterOverflowMenu(); Redo(); }, icon: icon,
-                    tipKey: "gallery.tooltip.redo", tipDefault: "Redo");
+                    tipKey: "gallery.tooltip.redo", tipDefault: "Redo (Ctrl+Y / Ctrl+Shift+Z)");
             }
         }
 

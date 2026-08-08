@@ -1013,8 +1013,6 @@ namespace VPB
 
 		/// <summary>True after <see cref="TryEnsureMetaJsonLiteFields"/> ran (success or miss).</summary>
 		private bool _metaJsonLiteLoaded;
-		/// <summary>True after lite parse included <see cref="LicenseType"/> (migration for in-memory packages).</summary>
-		private bool _metaJsonLiteLicensePass;
 		public List<string> PackageDependencies
 		{
 			get;
@@ -1243,7 +1241,6 @@ namespace VPB
 			PromotionalLink = null;
 			LicenseType = null;
 			_metaJsonLiteLoaded = false;
-			_metaJsonLiteLicensePass = false;
 			_referenceVersionOptionsLoaded = false;
 			StandardReferenceVersionOption = ReferenceVersionOption.Latest;
 			ScriptReferenceVersionOption = ReferenceVersionOption.Latest;
@@ -1255,18 +1252,22 @@ namespace VPB
 		/// Cache-hit scan restores clothing/hair tags but skips meta.json prose.
 		/// Call before UI reads <see cref="Description"/> / <see cref="PromotionalLink"/> /
 		/// <see cref="LicenseType"/> / <see cref="PackageMetaTags"/>.
+		/// Once-shot: missing/corrupt meta must not reopen the .var ZIP on every UI hover.
 		/// </summary>
 		public bool TryEnsureMetaJsonLiteFields()
 		{
-			if (_metaJsonLiteLoaded && _metaJsonLiteLicensePass && _referenceVersionOptionsLoaded)
+			// Early-out on attempt flag only. Old gate also required _referenceVersionOptionsLoaded;
+			// miss/fail left that false → every tip/hover reopened ZIP (main-thread stall).
+			if (_metaJsonLiteLoaded)
+			{
 				return !string.IsNullOrEmpty(Description)
 					|| !string.IsNullOrEmpty(PromotionalLink)
 					|| !string.IsNullOrEmpty(LicenseType)
 					|| (PackageMetaTags != null && PackageMetaTags.Count > 0)
 					|| _referenceVersionOptionsLoaded;
+			}
 
 			_metaJsonLiteLoaded = true;
-			_metaJsonLiteLicensePass = true;
 			try
 			{
 				if (string.IsNullOrEmpty(Path) || !File.Exists(Path))
@@ -1351,6 +1352,12 @@ namespace VPB
 			catch
 			{
 				return false;
+			}
+			finally
+			{
+				// Miss / corrupt / no tags still counts as done — hover must not retry ZIP.
+				if (!_referenceVersionOptionsLoaded)
+					_referenceVersionOptionsLoaded = true;
 			}
 
 			return !string.IsNullOrEmpty(Description)
@@ -2025,21 +2032,37 @@ namespace VPB
 								}
 							}
 							catch { }
-							try
-							{
-								var promoNode = asObject["promotionalLink"];
-								if (promoNode != null)
-								{
-									string p = promoNode.Value;
-									if (!string.IsNullOrEmpty(p)) PromotionalLink = p.Trim();
-								}
-							}
-							catch { }
+                            try
+                            {
+                                var promoNode = asObject["promotionalLink"];
+                                if (promoNode != null)
+                                {
+                                    string p = promoNode.Value;
+                                    if (!string.IsNullOrEmpty(p)) PromotionalLink = p.Trim();
+                                }
+                            }
+                            catch { }
 
-							try { PackageReferenceVersionResolver.ApplyFromMetaJson(this, asObject); } catch { }
+                            try
+                            {
+                                JSONNode licenseNode = asObject["licenseType"];
+                                if (licenseNode != null)
+                                {
+                                    string lic = licenseNode.Value;
+                                    if (!string.IsNullOrEmpty(lic)
+                                        && !string.Equals(lic, "null", StringComparison.OrdinalIgnoreCase))
+                                        LicenseType = lic.Trim();
+                                }
+                            }
+                            catch { }
 
-							if (!FileManager.IsBulkDeepScanActive)
-								FindMissingDependenciesRecursive(asObject);
+                            try { PackageReferenceVersionResolver.ApplyFromMetaJson(this, asObject); } catch { }
+
+                            // Full scan already read lite meta fields — skip ZIP reopen on filter/hover.
+                            _metaJsonLiteLoaded = true;
+
+                            if (!FileManager.IsBulkDeepScanActive)
+                                FindMissingDependenciesRecursive(asObject);
 						}
 					}
 				}

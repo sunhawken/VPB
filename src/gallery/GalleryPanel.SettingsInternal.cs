@@ -341,7 +341,6 @@ namespace VPB
             public float MovementThreshold;
             public float BringToFrontDistance;
             public bool EnableDragDrop;
-            public bool GalleryTboxToolbarPinned;
             public bool GalleryAutoGenderFilter;
             public bool GalleryCollapseOnSceneLaunch;
             public bool VerticalMoveKeysEnabled;
@@ -650,7 +649,7 @@ namespace VPB
             });
             defs.Add(new InternalSettingDefinition {
                 Key = "visuals.galleryUiScaleDesktop", GroupKey = "visuals", Label = VPBTranslation.T("settings.gallery_ui_scale_desktop", "Gallery UI Scale (Desktop)"),
-                Tooltip = VPBTranslation.T("settings.tip.gallery_ui_scale_desktop", "Scales gallery chrome, side buttons, and in-pane controls on desktop. Also follows VaM's UI Scale setting."),
+                Tooltip = VPBTranslation.T("settings.tip.gallery_ui_scale_desktop", "Scales gallery chrome, side buttons, and in-pane controls on desktop. Also multiplies by VaM Monitor UI Scale. New installs auto-pick a starting value from screen height."),
                 ControlType = InternalSettingControlType.Slider, GetFloat = () => VPBConfig.Instance.InnerPaneScaleDesktop,
                 SetFloat = v => { VPBConfig.Instance.InnerPaneScaleDesktop = Mathf.Clamp(v, VPBConfig.MinUiScale, VPBConfig.MaxUiScale); VPBConfig.Instance.TriggerChange(); },
                 Min = VPBConfig.MinUiScale, Max = VPBConfig.MaxUiScale, Step = 0.1f, Decimals = 1,
@@ -742,26 +741,12 @@ namespace VPB
 
             defs.Add(new InternalSettingDefinition {
                 Key = "interaction.dragDrop", GroupKey = "interaction", Label = VPBTranslation.T("settings.enable_drag_drop", "Enable Drag & Drop"),
-                Tooltip = VPBTranslation.T("settings.tip.enable_drag_drop", "Off by default. Turn on to drag items from the gallery onto atoms or the scene."),
+                Tooltip = VPBTranslation.T("settings.tip.enable_drag_drop", "Off by default. Desktop: click-drag a row (~22px) onto an atom/scene (scroll with wheel/scrollbar). VR: hold then drag. Disabled while Hold-to-Launch is on."),
                 ControlType = InternalSettingControlType.Toggle, GetBool = () => VPBConfig.Instance.EnableDragDrop,
                 SetBool = v =>
                 {
                     VPBConfig.Instance.EnableDragDrop = v;
                     VPBConfig.Instance.NormalizeDragDropHoldSettings();
-                }
-            });
-            defs.Add(new InternalSettingDefinition {
-                Key = "interaction.pinToolboxToolbar", GroupKey = "interaction",
-                Label = VPBTranslation.T("settings.pin_toolbox_toolbar", "Pin toolbox toolbar"),
-                Tooltip = VPBTranslation.T("settings.tip.pin_toolbox_toolbar", "Keep the selection toolbox expanded even when nothing is selected."),
-                ControlType = InternalSettingControlType.Toggle,
-                GetBool = () => VPBConfig.Instance.GalleryTboxToolbarPinned,
-                SetBool = v =>
-                {
-                    VPBConfig.Instance.GalleryTboxToolbarPinned = v;
-                    try { VPBConfig.Instance.Save(false); } catch { }
-                    try { SyncTboxPinnedFromConfig(); } catch { }
-                    VPBConfig.Instance.TriggerChange();
                 }
             });
             defs.Add(new InternalSettingDefinition {
@@ -789,8 +774,8 @@ namespace VPB
                 SetBool = v => { VPBConfig.Instance.VerticalMoveKeysEnabled = v; VPBConfig.Instance.TriggerChange(); }
             });
             defs.Add(new InternalSettingDefinition {
-                Key = "interaction.dragHoldSec", GroupKey = "interaction", Label = VPBTranslation.T("settings.drag_hold_threshold", "Hold duration (s)"),
-                Tooltip = VPBTranslation.T("settings.tip.drag_hold_threshold", "When drag-and-drop is on: how long pointer must stay held before drag starts (minimum " + VPBConfig.DragHoldThresholdMin.ToString(System.Globalization.CultureInfo.InvariantCulture) + " s)."),
+                Key = "interaction.dragHoldSec", GroupKey = "interaction", Label = VPBTranslation.T("settings.drag_hold_threshold", "VR hold duration (s)"),
+                Tooltip = VPBTranslation.T("settings.tip.drag_hold_threshold", "VR only: how long to hold before an item drag starts (min " + VPBConfig.DragHoldThresholdMin.ToString(System.Globalization.CultureInfo.InvariantCulture) + " s). Desktop ignores this — click-drag after a short move starts drag-and-drop."),
                 ControlType = InternalSettingControlType.Slider, GetFloat = () => VPBConfig.Instance.DragHoldThreshold,
                 SetFloat = v => { VPBConfig.Instance.DragHoldThreshold = VPBConfig.ClampDragHoldThreshold(v); },
                 Min = VPBConfig.DragHoldThresholdMin, Max = 1f, Step = 0.1f, Decimals = 1,
@@ -858,7 +843,7 @@ namespace VPB
             });
             defs.Add(new InternalSettingDefinition {
                 Key = "desktop.initialCategory", GroupKey = "categories", SubGroupKey = "options", Label = VPBTranslation.T("settings.initial_gallery_category", "Gallery opens on"),
-                Tooltip = VPBTranslation.T("settings.tip.initial_gallery_category", "Which category is shown when gallery opens."),
+                Tooltip = VPBTranslation.T("settings.tip.initial_gallery_category", "Category when VaM starts (cold launch). Close/reopen gallery during the same session restores the last category you used. Choose LastUsed to restore last category even on cold launch."),
                 ControlType = InternalSettingControlType.Cycle, Options = new[] { "Scenes", "Clothing", "Hair", "Pose", "Appearance", "Plugins", "LastUsed" },
                 GetString = () => VPBConfig.NormalizeInitialGalleryCategory(VPBConfig.Instance.InitialGalleryCategory),
                 SetString = v => { VPBConfig.Instance.InitialGalleryCategory = v; VPBConfig.Instance.TriggerChange(); }
@@ -866,7 +851,7 @@ namespace VPB
 
             defs.Add(new InternalSettingDefinition {
                 Key = "lists.defaultLeft", GroupKey = "lists", Label = VPBTranslation.T("settings.gallery_default_left_panel", "Left side list (default)"),
-                Tooltip = VPBTranslation.T("settings.tip.gallery_default_left_panel", "Which filter list or Import sidebar opens on the left for new panes."),
+                Tooltip = VPBTranslation.T("settings.tip.gallery_default_left_panel", "Left list / Import on cold VaM launch. During the same session, Close/reopen restores the rails you last had open."),
                 ControlType = InternalSettingControlType.Cycle, Options = VPBConfig.GallerySidePanelOptions,
                 GetString = () => VPBConfig.NormalizeGallerySidePanel(VPBConfig.Instance.GalleryDefaultLeftSidePanel),
                 SetString = v => {
@@ -878,7 +863,7 @@ namespace VPB
             });
             defs.Add(new InternalSettingDefinition {
                 Key = "lists.defaultRight", GroupKey = "lists", Label = VPBTranslation.T("settings.gallery_default_right_panel", "Right side list (default)"),
-                Tooltip = VPBTranslation.T("settings.tip.gallery_default_right_panel", "Which filter list or Import sidebar opens on the right for new panes."),
+                Tooltip = VPBTranslation.T("settings.tip.gallery_default_right_panel", "Right list / Import on cold VaM launch. During the same session, Close/reopen restores the rails you last had open."),
                 ControlType = InternalSettingControlType.Cycle, Options = VPBConfig.GallerySidePanelOptions,
                 GetString = () => VPBConfig.NormalizeGallerySidePanel(VPBConfig.Instance.GalleryDefaultRightSidePanel),
                 SetString = v => {
@@ -966,15 +951,16 @@ namespace VPB
             defs.Add(new InternalSettingDefinition {
                 Key = "lists.hideCreatorSideButtons", GroupKey = "lists",
                 Label = VPBTranslation.T("settings.gallery_hide_creator_side_buttons", "Hide creator side buttons"),
-                Tooltip = VPBTranslation.T("settings.tip.gallery_hide_creator_side_buttons", "Hides side-rail Creator buttons. Use title-bar creator control only. Closes open creator side lists."),
+                Tooltip = VPBTranslation.T("settings.tip.gallery_hide_creator_side_buttons", "Does not create side-rail Creator buttons. Use title-bar creator control only. Closes open creator side lists."),
                 ControlType = InternalSettingControlType.Toggle,
                 GetBool = () => VPBConfig.Instance.GalleryHideCreatorSideButtons,
                 SetBool = v => {
                     VPBConfig.Instance.GalleryHideCreatorSideButtons = v;
                     try { VPBConfig.Instance.Save(false); } catch { }
-                    VPBConfig.Instance.TriggerChange();
-                    try { EnforceCreatorSideRailButtonVisibilityFromConfig(); } catch { }
+                    // Presence sync once (create or destroy). Do not ToggleChange-layout thrash chips.
+                    try { SyncCreatorSideRailPresence(); } catch { }
                     try { UpdateSideButtonPositions(); } catch { }
+                    try { VPBConfig.Instance.TriggerChange(); } catch { }
                 }
             });
             defs.Add(new InternalSettingDefinition {
@@ -1179,7 +1165,7 @@ namespace VPB
                 Tooltip = VPBTranslation.T("settings.tip.hover_preview_size", "Size in pixels of square hover preview."),
                 ControlType = InternalSettingControlType.Slider, GetFloat = () => VPBConfig.Instance.GalleryListHoverPreviewSize,
                 SetFloat = v => { VPBConfig.Instance.GalleryListHoverPreviewSize = v; VPBConfig.Instance.TriggerChange(); },
-                Min = 200f, Max = 600f, Step = 10f, Decimals = 0,
+                Min = VPBConfig.GalleryHoverPreviewSizeMin, Max = VPBConfig.GalleryHoverPreviewSizeMax, Step = 10f, Decimals = 0,
                 RowVisible = () => VPBConfig.Instance != null && !string.Equals(VPBConfig.NormalizeHoverPreviewMode(VPBConfig.Instance.GalleryHoverPreviewMode), "Off", StringComparison.OrdinalIgnoreCase)
             });
             defs.Add(new InternalSettingDefinition {
@@ -1206,8 +1192,8 @@ namespace VPB
                 SetBool = v => { VPBConfig.Instance.GalleryGridLabelsEnabled = v; RebuildGridLayout(); }
             });
             defs.Add(new InternalSettingDefinition {
-                Key = "grid.hoverBadges", GroupKey = "grid", Label = VPBTranslation.T("settings.grid_hover_badges", "Hover rating star"),
-                Tooltip = VPBTranslation.T("settings.tip.grid_hover_badges", "Show rating star on grid hover for quick rate. Off keeps dense grids faster."),
+                Key = "grid.hoverBadges", GroupKey = "grid", Label = VPBTranslation.T("settings.grid_hover_badges", "Hover rating digit"),
+                Tooltip = VPBTranslation.T("settings.tip.grid_hover_badges", "Show colored rating digit on grid hover for quick rate. Off keeps dense grids faster."),
                 ControlType = InternalSettingControlType.Toggle, GetBool = () => VPBConfig.Instance.GalleryGridHoverBadgesEnabled,
                 SetBool = v => { VPBConfig.Instance.GalleryGridHoverBadgesEnabled = v; VPBConfig.Instance.TriggerChange(); }
             });
@@ -1715,7 +1701,6 @@ namespace VPB
                 MovementThreshold = VPBConfig.Instance.MovementThreshold,
                 BringToFrontDistance = VPBConfig.Instance.BringToFrontDistance,
                 EnableDragDrop = VPBConfig.Instance.EnableDragDrop,
-                GalleryTboxToolbarPinned = VPBConfig.Instance.GalleryTboxToolbarPinned,
                 GalleryAutoGenderFilter = VPBConfig.Instance.GalleryAutoGenderFilter,
                 GalleryCollapseOnSceneLaunch = VPBConfig.Instance.GalleryCollapseOnSceneLaunch,
                 VerticalMoveKeysEnabled = VPBConfig.Instance.VerticalMoveKeysEnabled,
@@ -1887,6 +1872,38 @@ namespace VPB
             try { RefreshTboxConditionalActionButtons(); } catch { }
         }
 
+        /// <summary>
+        /// Drop settings rows from the middle pane before any Grid restore / browse Refresh.
+        /// Prevents InternalSettingRowEntry cells painting as gallery tiles during the async handoff
+        /// (esp. VR, where browse Refresh can lag chrome/layout churn).
+        /// </summary>
+        private void ClearMiddlePaneOfSettingsRows()
+        {
+            try
+            {
+                if (currentFilteredFiles != null)
+                    currentFilteredFiles.Clear();
+                if (selectedFiles != null)
+                    selectedFiles.Clear();
+                if (selectedFilePaths != null)
+                    selectedFilePaths.Clear();
+                selectedPath = null;
+
+                RecyclingGridView rgv = recyclingGrid;
+                if (rgv == null && contentGO != null)
+                {
+                    try { rgv = contentGO.GetComponent<RecyclingGridView>(); } catch { }
+                }
+                if (rgv != null)
+                {
+                    // Keep 1-col list config until browse Refresh commits real layout — empty grid is OK.
+                    try { ApplyInternalSettingsListGridConfig(rgv, deferRefresh: true); } catch { }
+                    rgv.SetItemCount(0, deferRefresh: false);
+                }
+            }
+            catch { }
+        }
+
         private void SyncInternalSettingsListView()
         {
             bool open = IsSettingsPanelOpen();
@@ -1902,14 +1919,23 @@ namespace VPB
             if (!settingsListViewActive && !internalSettingsHadPreSessionViewState) return;
             settingsListViewActive = false;
             if (internalSettingsSessionActive) CancelInternalSettingsSession();
-            if (internalSettingsHadPreSessionViewState)
+
+            // Atomic handoff: never SetLayoutMode(Grid)+Refresh while settings rows still bound.
+            ClearMiddlePaneOfSettingsRows();
+
+            GalleryLayoutMode restoreMode = internalSettingsPreSessionLayoutMode;
+            float restoreScroll = internalSettingsPreSessionScrollNormalized;
+            bool needLayoutRestore = internalSettingsHadPreSessionViewState;
+            internalSettingsHadPreSessionViewState = false;
+
+            if (needLayoutRestore)
             {
-                SetLayoutMode(internalSettingsPreSessionLayoutMode);
+                // keepInternalSettingsMode: session already torn down; avoid re-entering Exit.
+                SetLayoutMode(restoreMode, persistConfig: false, keepInternalSettingsMode: true);
                 if (scrollRect != null)
-                    scrollRect.verticalNormalizedPosition = Mathf.Clamp01(internalSettingsPreSessionScrollNormalized);
+                    scrollRect.verticalNormalizedPosition = Mathf.Clamp01(restoreScroll);
             }
             RefreshFiles(true);
-            internalSettingsHadPreSessionViewState = false;
         }
 
         private void RefreshGalleryScanWlBorderVisuals()
@@ -2493,7 +2519,12 @@ namespace VPB
 
             try { ApplySidePanelDefaultsFromConfig(); } catch { }
 
-            if (!changed) return;
+            // Orphan settingsListViewActive (panel already cleared) must still Sync — otherwise
+            // RefreshFiles diverts to a dead settings refresh and middle pane stays tile-stuck.
+            bool needsSync = changed || settingsListViewActive || internalSettingsHadPreSessionViewState;
+            if (!needsSync) return;
+
+            try { SetTitleSearchInputTextWithoutNotify(titleSearchInput, GetTitleSearchBrowseFieldText(), _titleBarSearchOnValueChanged); } catch { }
             UpdateLayout();
             UpdateTabs();
             SyncInternalSettingsListView();
@@ -2532,7 +2563,6 @@ namespace VPB
             VPBConfig.Instance.MovementThreshold = b.MovementThreshold;
             VPBConfig.Instance.BringToFrontDistance = b.BringToFrontDistance;
             VPBConfig.Instance.EnableDragDrop = b.EnableDragDrop;
-            VPBConfig.Instance.GalleryTboxToolbarPinned = b.GalleryTboxToolbarPinned;
             VPBConfig.Instance.GalleryAutoGenderFilter = b.GalleryAutoGenderFilter;
             VPBConfig.Instance.GalleryCollapseOnSceneLaunch = b.GalleryCollapseOnSceneLaunch;
             VPBConfig.Instance.VerticalMoveKeysEnabled = b.VerticalMoveKeysEnabled;
@@ -2616,8 +2646,8 @@ namespace VPB
             {
                 ApplyInnerPaneScale();
                 categoriesCached = false;
-                RebuildGridLayout();
-                RefreshFiles(true);
+                // Layout restore + browse RefreshFiles owned by SyncInternalSettingsListView /
+                // ExitInternalSettingsMode — avoid Grid refresh while settings rows still bound.
                 try { _detailStripCacheKey = ""; DetailStripRefresh(); } catch { }
             }
             ApplyGalleryTransparencyToAllPanels();

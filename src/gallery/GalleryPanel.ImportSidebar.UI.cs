@@ -10,6 +10,7 @@ namespace VPB
         private const float ImportSidebarBaseWidth = GalleryUiDesignTokens.ImportSidebarWidthRef;
         private const float ImportSidebarBaseHeaderHeight = GalleryUiDesignTokens.ImportSidebarHeaderHeightRef;
         private const float ImportSidebarBaseApplyHeight = GalleryUiDesignTokens.ImportSidebarApplyHeightRef;
+        private const float ImportSidebarBaseApplyReasonHeight = GalleryUiDesignTokens.ImportSidebarApplyReasonHeightRef;
         private const float ImportSidebarBaseSideMargin = GalleryUiDesignTokens.ImportSidebarSideMarginRef;
         private const float ImportSidebarBaseTopRowRef = GalleryUiDesignTokens.ImportSidebarTopRowRef;
         private const float ImportSidebarScrollBarWidthRef = GalleryUiDesignTokens.ImportSidebarScrollBarWidthRef;
@@ -42,6 +43,8 @@ namespace VPB
         private RectTransform importSidebarBodyScrollRT;     // CreateVScrollableContent root (the scroll viewport host)
         private RectTransform importSidebarScrollContentRT;  // VLG content node holding all rows (target of ForceRebuild)
         private RectTransform importSidebarApplyRT;          // pinned Apply button
+        private GameObject importSidebarHeaderFloatBtnGO;    // docked header "Float" control
+        private Text importSidebarHeaderFloatBtnText;
 
         partial void BuildImportSidebar()
         {
@@ -68,7 +71,7 @@ namespace VPB
                 // Transparent root, like leftTabScrollGO / rightTabScrollGO. Rows render against
                 // the gallery panel background, so the sidebar visually reads as part of the same
                 // UI family rather than a foreign popup tinted with PopupBackdrop.
-                Image bg = UI.AddImage(importSidebarRoot, new Color(0f, 0f, 0f, 0f), false);
+                importSidebarRootBg = UI.AddImage(importSidebarRoot, new Color(0f, 0f, 0f, 0f), false);
 
                 int siblingIndex = ResolveImportSidebarSiblingIndex(parent);
                 importSidebarRoot.transform.SetSiblingIndex(siblingIndex);
@@ -81,6 +84,10 @@ namespace VPB
                 BuildImportSidebarPinnedApply();
                 LogUtil.Log("[VPB import][diag] build: wizard body");
                 BuildImportSidebarWizardBody();
+                LogUtil.Log("[VPB import][diag] build: float chrome");
+                BuildImportSidebarFloatChrome();
+                LoadImportSidebarFloatGeometryFromConfig();
+                // Float entry lives on docked header (not scroll row).
 
                 // Re-run rect/font scaling whenever VPB's inner-pane scale changes (Settings UI scale slider).
                 innerPaneScaleActions.Add(ApplyImportSidebarBaseRect);
@@ -115,15 +122,36 @@ namespace VPB
         private void ApplyImportSidebarBaseRect(float s)
         {
             if (importSidebarRT == null) return;
+            if (importSidebarDetached)
+                ApplyImportSidebarFloatRect(s);
+            else
+                ApplyImportSidebarDockRect(s);
+
+            try { AlignImportSidebarScrollViewport(s); } catch { }
+            try { SyncImportSidebarScrollContentLayout(s); } catch { }
+            try { SyncImportSidebarTypeRadioGridWidth(s); } catch { }
+            try { SyncImportSidebarHoverChrome(); } catch { }
+            try { StyleImportSidebarHeader(s); } catch { }
+            EnsureImportSidebarHeaderClickable();
+            SyncImportSidebarHeaderLabel();
+            SyncImportSidebarHeaderTypography(s);
+            SyncImportSidebarHeaderGateVisual();
+            try { RefreshImportSidebarWizardHeader(); } catch { }
+            SyncImportSidebarFloatChromeScale(s);
+            if (!importSidebarDetached)
+                SyncImportSidebarFloatDetachRowLabel();
+        }
+
+        private void ApplyImportSidebarDockRect(float s)
+        {
             float w = ImportSidebarBaseWidth * s;
             float leftMargin = SideTabColumnLeftInsetX(s);
             float rightMargin = -SideTabColumnRightInsetX(s);
-            float top = ImportSidebarTopOffsetY(s);          // negative: inset down from panel top
-            // Clear the full footer chrome (the tab-column container uses 68, but its visible content stops at this
-            // larger inset; the sidebar's Apply button is visible at the bottom, so it must clear the whole footer).
+            float top = ImportSidebarTopOffsetY(s);
             float bottom = SideTabScrollBottomInsetY();
 
             importSidebarRT.pivot = new Vector2(0.5f, 0.5f);
+            importSidebarRT.sizeDelta = Vector2.zero;
             if (importSidebarOnLeft)
             {
                 importSidebarRT.anchorMin = new Vector2(0f, 0f);
@@ -142,53 +170,239 @@ namespace VPB
             float headerH = ImportSidebarBaseHeaderHeight * s;
             float headerGap = ImportSidebarBaseHeaderGap * s;
             float applyH = ImportSidebarBaseApplyHeight * s;
+            float reasonH = ResolveImportSidebarApplyReasonHeight(s);
             ApplyImportSidebarChromeHorizontalInsets(s, out float insetLeft, out float insetRight);
+            LayoutImportSidebarInnerChrome(s, 0f, 0f, headerH, headerGap, applyH, reasonH, insetLeft, insetRight, showBody: true);
+        }
 
+        private void ApplyImportSidebarFloatRect(float s)
+        {
+            float titleH = GalleryUiDesignTokens.QuickFiltersTitleBarHeightRef * s;
+            float footerH = importSidebarFloatCollapsed ? 0f : GalleryUiDesignTokens.QuickFiltersFooterHeightRef * s;
+            // Float title bar owns identity (type → target). Docked header chip stays hidden — no duplicate banner.
+            float headerH = 0f;
+            float headerGap = 0f;
+            float applyH = importSidebarFloatCollapsed ? 0f : ImportSidebarBaseApplyHeight * s;
+            float reasonH = importSidebarFloatCollapsed ? 0f : ResolveImportSidebarApplyReasonHeight(s);
+
+            float wRef = ResolveImportSidebarFloatWidthRef();
+            float hRef = importSidebarFloatCollapsed
+                ? GalleryUiDesignTokens.QuickFiltersTitleBarHeightRef
+                : ResolveImportSidebarFloatHeightRef();
+            float w = wRef * s;
+            float h = hRef * s;
+
+            importSidebarRT.anchorMin = new Vector2(0.5f, 0.5f);
+            importSidebarRT.anchorMax = new Vector2(0.5f, 0.5f);
+            importSidebarRT.pivot = new Vector2(0f, 1f);
+            importSidebarRT.sizeDelta = new Vector2(w, h);
+
+            if (importSidebarCollapsedTopLeftPos.HasValue && importSidebarFloatCollapsed)
+                importSidebarRT.anchoredPosition = importSidebarCollapsedTopLeftPos.Value;
+            else
+                ApplyImportSidebarFloatAnchorsAndPos(s);
+            ClampImportSidebarFloatIntoHost();
+
+            ApplyImportSidebarChromeHorizontalInsets(s, out float insetLeft, out float insetRight);
+            LayoutImportSidebarInnerChrome(s, titleH, footerH, headerH, headerGap, applyH, reasonH, insetLeft, insetRight,
+                showBody: !importSidebarFloatCollapsed);
+
+            if (importSidebarRootBg != null)
+            {
+                // Collapsed: match title bar so no dark panel strip under chrome.
+                importSidebarRootBg.color = importSidebarFloatCollapsed
+                    ? ImportSidebarFloatTitleBarBg
+                    : ImportSidebarFloatPanelBg;
+            }
+            if (importSidebarFloatTitleBarGO != null)
+            {
+                importSidebarFloatTitleBarGO.SetActive(true);
+                RectTransform titleRT = importSidebarFloatTitleBarGO.GetComponent<RectTransform>();
+                if (titleRT != null)
+                {
+                    titleRT.anchorMin = new Vector2(0f, 1f);
+                    titleRT.anchorMax = new Vector2(1f, 1f);
+                    titleRT.pivot = new Vector2(0.5f, 1f);
+                    titleRT.anchoredPosition = Vector2.zero;
+                    // Match Filter Presets: sizeDelta only — offsetMin/Max fight point-Y anchors.
+                    titleRT.sizeDelta = new Vector2(0f, titleH);
+                }
+            }
+            if (importSidebarFloatFooterGO != null)
+            {
+                importSidebarFloatFooterGO.SetActive(!importSidebarFloatCollapsed);
+                RectTransform footerRT = importSidebarFloatFooterGO.GetComponent<RectTransform>();
+                if (footerRT != null && !importSidebarFloatCollapsed)
+                {
+                    footerRT.anchorMin = new Vector2(0f, 0f);
+                    footerRT.anchorMax = new Vector2(1f, 0f);
+                    footerRT.pivot = new Vector2(0.5f, 0f);
+                    footerRT.anchoredPosition = Vector2.zero;
+                    footerRT.sizeDelta = new Vector2(0f, footerH);
+                }
+                importSidebarFloatFooterGO.transform.SetAsLastSibling();
+            }
+            if (importSidebarFloatTitleBarGO != null)
+                importSidebarFloatTitleBarGO.transform.SetAsLastSibling();
+        }
+
+        private float ResolveImportSidebarApplyReasonHeight(float s)
+        {
+            if (importSidebarApplyReasonRT == null || !importSidebarApplyReasonRT.gameObject.activeSelf)
+                return 0f;
+            return ImportSidebarBaseApplyReasonHeight * s;
+        }
+
+        /// <summary>Reposition Apply + reason strip without full BaseRect (called from RefreshApplyButtonEnabled).</summary>
+        private void LayoutImportSidebarApplyBand(float s)
+        {
+            if (importSidebarRT == null || !importSidebarActive) return;
+            float titleH = 0f;
+            float footerH = 0f;
+            if (importSidebarDetached)
+            {
+                titleH = GalleryUiDesignTokens.QuickFiltersTitleBarHeightRef * s;
+                footerH = importSidebarFloatCollapsed ? 0f : GalleryUiDesignTokens.QuickFiltersFooterHeightRef * s;
+            }
+            // Detached: title bar only (no docked header). Docked: full header chip.
+            bool hideDockedHeader = importSidebarDetached;
+            float headerH = (hideDockedHeader || importSidebarFloatCollapsed) ? 0f : ImportSidebarBaseHeaderHeight * s;
+            float headerGap = (hideDockedHeader || importSidebarFloatCollapsed) ? 0f : ImportSidebarBaseHeaderGap * s;
+            float applyH = (importSidebarDetached && importSidebarFloatCollapsed) ? 0f : ImportSidebarBaseApplyHeight * s;
+            float reasonH = (importSidebarDetached && importSidebarFloatCollapsed) ? 0f : ResolveImportSidebarApplyReasonHeight(s);
+            ApplyImportSidebarChromeHorizontalInsets(s, out float insetLeft, out float insetRight);
+            bool showBody = !(importSidebarDetached && importSidebarFloatCollapsed);
+            LayoutImportSidebarInnerChrome(s, titleH, footerH, headerH, headerGap, applyH, reasonH, insetLeft, insetRight, showBody);
+        }
+
+        private void LayoutImportSidebarInnerChrome(
+            float s, float titleH, float footerH, float headerH, float headerGap, float applyH, float reasonH,
+            float insetLeft, float insetRight, bool showBody)
+        {
             if (importSidebarHeaderRT != null)
             {
-                importSidebarHeaderRT.anchorMin = new Vector2(0f, 1f);
-                importSidebarHeaderRT.anchorMax = new Vector2(1f, 1f);
-                importSidebarHeaderRT.pivot = new Vector2(0.5f, 1f);
-                importSidebarHeaderRT.anchoredPosition = Vector2.zero;
-                importSidebarHeaderRT.offsetMin = new Vector2(insetLeft, -headerH);
-                importSidebarHeaderRT.offsetMax = new Vector2(-insetRight, 0f);
+                // Docked side panel only — float window already has a title bar with the same summary.
+                bool showHeader = showBody && !importSidebarDetached && headerH > 0.5f;
+                importSidebarHeaderRT.gameObject.SetActive(showHeader);
+                if (showHeader)
+                {
+                    importSidebarHeaderRT.anchorMin = new Vector2(0f, 1f);
+                    importSidebarHeaderRT.anchorMax = new Vector2(1f, 1f);
+                    importSidebarHeaderRT.pivot = new Vector2(0.5f, 1f);
+                    importSidebarHeaderRT.anchoredPosition = new Vector2(0f, -titleH);
+                    importSidebarHeaderRT.offsetMin = new Vector2(insetLeft, -titleH - headerH);
+                    importSidebarHeaderRT.offsetMax = new Vector2(-insetRight, -titleH);
+                }
             }
+
+            float applyBand = applyH + reasonH;
 
             if (importSidebarApplyRT != null)
             {
-                importSidebarApplyRT.offsetMin = new Vector2(insetLeft, 0f);
-                importSidebarApplyRT.offsetMax = new Vector2(-insetRight, applyH);
+                importSidebarApplyRT.gameObject.SetActive(showBody);
+                if (showBody)
+                {
+                    importSidebarApplyRT.anchorMin = new Vector2(0f, 0f);
+                    importSidebarApplyRT.anchorMax = new Vector2(1f, 0f);
+                    importSidebarApplyRT.pivot = new Vector2(0.5f, 0f);
+                    importSidebarApplyRT.anchoredPosition = new Vector2(0f, footerH);
+                    importSidebarApplyRT.offsetMin = new Vector2(insetLeft, footerH);
+                    importSidebarApplyRT.offsetMax = new Vector2(-insetRight, footerH + applyH);
+                }
+            }
+
+            if (importSidebarApplyReasonRT != null)
+            {
+                bool showReason = showBody && importSidebarApplyReasonRT.gameObject.activeSelf && reasonH > 0.5f;
+                if (showReason)
+                {
+                    importSidebarApplyReasonRT.anchorMin = new Vector2(0f, 0f);
+                    importSidebarApplyReasonRT.anchorMax = new Vector2(1f, 0f);
+                    importSidebarApplyReasonRT.pivot = new Vector2(0.5f, 0f);
+                    importSidebarApplyReasonRT.anchoredPosition = new Vector2(0f, footerH + applyH);
+                    importSidebarApplyReasonRT.offsetMin = new Vector2(insetLeft, footerH + applyH);
+                    importSidebarApplyReasonRT.offsetMax = new Vector2(-insetRight, footerH + applyBand);
+                }
             }
 
             if (importSidebarBodyScrollRT != null)
             {
-                // Full sidebar width — internal viewport reserves scrollbar gutter (matches header/apply content column).
-                importSidebarBodyScrollRT.offsetMin = new Vector2(0f, applyH);
-                importSidebarBodyScrollRT.offsetMax = new Vector2(0f, -(headerH + headerGap));
+                importSidebarBodyScrollRT.gameObject.SetActive(showBody);
+                if (showBody)
+                {
+                    importSidebarBodyScrollRT.anchorMin = Vector2.zero;
+                    importSidebarBodyScrollRT.anchorMax = Vector2.one;
+                    importSidebarBodyScrollRT.pivot = new Vector2(0.5f, 0.5f);
+                    importSidebarBodyScrollRT.offsetMin = new Vector2(0f, footerH + applyBand);
+                    importSidebarBodyScrollRT.offsetMax = new Vector2(0f, -(titleH + headerH + headerGap));
+                }
             }
+        }
 
-            try { AlignImportSidebarScrollViewport(s); } catch { }
-            try { SyncImportSidebarScrollContentLayout(s); } catch { }
-            try { SyncImportSidebarTypeRadioGridWidth(s); } catch { }
-            try { SyncImportSidebarScrollHoverBorders(); } catch { }
-            try { StyleImportSidebarHeader(s); } catch { }
-            EnsureImportSidebarHeaderClickable();
-            SyncImportSidebarHeaderLabel();
-            SyncImportSidebarHeaderTypography(s);
-            SyncImportSidebarHeaderGateVisual();
-            try { RefreshImportSidebarWizardHeader(); } catch { }
+        private void SyncImportSidebarFloatChromeScale(float s)
+        {
+            if (!importSidebarDetached) return;
+            float chromeSz = GalleryUiDesignTokens.ButtonSizeRef * s;
+            ScaleImportSidebarFloatChromeBtn(importSidebarFloatCollapseBtnGO, chromeSz, s);
+            ScaleImportSidebarFloatChromeBtn(importSidebarFloatCloseBtnGO, chromeSz, s);
+            ScaleImportSidebarFloatChromeBtn(importSidebarFloatResizeHandleGO, chromeSz, s);
+            if (importSidebarFloatDockBtnGO != null)
+            {
+                LayoutElement le = importSidebarFloatDockBtnGO.GetComponent<LayoutElement>();
+                if (le != null)
+                {
+                    le.preferredWidth = 72f * s;
+                    le.preferredHeight = chromeSz;
+                    le.minWidth = 56f * s;
+                }
+                Text dockTxt = importSidebarFloatDockBtnGO.GetComponentInChildren<Text>();
+                if (dockTxt != null)
+                    GalleryUiMetrics.ApplyFont(dockTxt, GalleryUiDesignTokens.PopupMenuRowFontRef, s, GalleryUiDesignTokens.FontMinRef);
+            }
+            if (importSidebarFloatTitleLabel != null)
+                GalleryUiMetrics.ApplyFont(importSidebarFloatTitleLabel, GalleryUiDesignTokens.FontBodyRef, s, GalleryUiDesignTokens.FontMinRef);
+        }
+
+        private static void ScaleImportSidebarFloatChromeBtn(GameObject go, float size, float s)
+        {
+            if (go == null || size <= 0f) return;
+            LayoutElement le = go.GetComponent<LayoutElement>();
+            if (le == null) le = go.AddComponent<LayoutElement>();
+            le.preferredWidth = size;
+            le.preferredHeight = size;
+            le.minWidth = size;
+            le.minHeight = size;
+            RectTransform rt = go.GetComponent<RectTransform>();
+            if (rt != null) rt.sizeDelta = new Vector2(size, size);
+            Transform iconTr = go.transform.Find("Icon");
+            if (iconTr != null)
+            {
+                RectTransform irt = iconTr as RectTransform;
+                if (irt != null)
+                {
+                    float pad = 5f * s;
+                    irt.sizeDelta = new Vector2(-pad * 2f, -pad * 2f);
+                }
+            }
         }
 
         private static float ImportSidebarScrollBarWidthPx(float s) => ImportSidebarScrollBarWidthRef * s;
 
-        /// <summary>Horizontal insets inside the 220px column: flush on panel-outer edge; pad only before scrollbar.</summary>
+        /// <summary>Horizontal insets: flush on panel-outer edge; pad only before scrollbar. Uses live width when floating.</summary>
         private void GetImportSidebarContentWidthInsets(float s, out float insetLeft, out float insetRight, out float contentWidth)
         {
             float scrollW = ImportSidebarScrollBarWidthPx(s);
             float padInner = ImportSidebarInnerPadHRef * s;
             insetLeft = 0f;
             insetRight = scrollW + padInner;
-            contentWidth = ImportSidebarBaseWidth * s - insetRight;
+            float panelW = ImportSidebarBaseWidth * s;
+            if (importSidebarDetached && importSidebarRT != null)
+            {
+                float live = importSidebarRT.sizeDelta.x;
+                if (live < 1f) live = importSidebarRT.rect.width;
+                if (live > 1f) panelW = live;
+            }
+            contentWidth = Mathf.Max(8f, panelW - insetRight);
         }
 
         private void ApplyImportSidebarChromeHorizontalInsets(float s,
@@ -217,6 +431,21 @@ namespace VPB
                 le.flexibleWidth = 0f;
                 le.preferredHeight = typeRadioRows * rowH + (typeRadioRows - 1) * gap;
             }
+        }
+
+        /// <summary>
+        /// Atom/type/option rows add Button without UIHoverBorder — gallery pane enforcer only walks
+        /// backgroundBoxGO. Floated import reparents to canvas, so auto-restore never gets borders
+        /// until a dock round-trip. Apply policy on the import tree itself, then force inward rims
+        /// under scroll RectMask2D (outward clips).
+        /// </summary>
+        private void SyncImportSidebarHoverChrome()
+        {
+            if (importSidebarRoot != null)
+            {
+                try { UI.ApplyGalleryPaneHoverPolicy(importSidebarRoot); } catch { }
+            }
+            SyncImportSidebarScrollHoverBorders();
         }
 
         /// <summary>Scroll body sits under RectMask2D — outward hover rims clip; draw inward like side-tab rows.</summary>
@@ -252,14 +481,108 @@ namespace VPB
         private void SyncImportSidebarHeaderGateVisual()
         {
             if (importSidebarHeaderRT == null) return;
-            bool gated = importSidebarOpenIntent && !ImportSidebarCategoryAllowed();
+            bool scenesLocked = importSidebarActive && importSidebarDetached && !ImportSidebarCategoryAllowed();
+            bool gatedClosed = importSidebarOpenIntent && !ImportSidebarCategoryAllowed() && !importSidebarDetached;
+
             Image bg = importSidebarHeaderRT.GetComponent<Image>();
             if (bg != null)
-                bg.color = gated ? new Color(ColorCategory.r * 0.55f, ColorCategory.g * 0.55f, ColorCategory.b * 0.55f, 0.75f) : ColorCategory;
+            {
+                if (scenesLocked)
+                    bg.color = new Color(0.32f, 0.24f, 0.12f, 1f);
+                else if (gatedClosed)
+                    bg.color = new Color(ColorCategory.r * 0.55f, ColorCategory.g * 0.55f, ColorCategory.b * 0.55f, 0.75f);
+                else
+                    bg.color = ImportSidebarHeaderBg;
+            }
             if (importSidebarHeaderLabel != null)
-                importSidebarHeaderLabel.color = gated ? new Color(0.82f, 0.82f, 0.82f, 0.9f) : Color.white;
+            {
+                if (scenesLocked)
+                    importSidebarHeaderLabel.color = ImportSidebarScenesLockedBanner;
+                else if (gatedClosed)
+                    importSidebarHeaderLabel.color = new Color(0.82f, 0.82f, 0.82f, 0.9f);
+                else
+                    importSidebarHeaderLabel.color = Color.white;
+            }
             if (importSidebarHeaderBtn != null)
-                importSidebarHeaderBtn.interactable = !gated;
+                importSidebarHeaderBtn.interactable = !gatedClosed && !importSidebarDetached;
+            if (importSidebarHeaderFloatBtnGO != null)
+                importSidebarHeaderFloatBtnGO.SetActive(!importSidebarDetached && importSidebarActive);
+        }
+
+        private void BuildImportSidebarHeader()
+        {
+            GameObject header = UI.CreateChildRT(importSidebarRoot, "Header", AnchorPresets.hStretchTop, new Vector2(0f, ImportSidebarBaseHeaderHeight));
+            importSidebarHeaderRT = header.GetComponent<RectTransform>();
+            importSidebarHeaderRoot = importSidebarHeaderRT;
+
+            Image bg = AddImportSidebarRoundedBg(header, ImportSidebarHeaderBg);
+
+            UI.AddHLG(
+                header, spacing: 4f, padding: UI.Pad(2, 4, 2, 2),
+                childAlignment: TextAnchor.MiddleCenter,
+                childControlWidth: true, childControlHeight: true,
+                childForceExpandWidth: false, childForceExpandHeight: true);
+
+            GameObject labelHost = new GameObject("HeaderLabelHost");
+            labelHost.transform.SetParent(header.transform, false);
+            UI.AddLE(labelHost, flexibleWidth: 1f, minWidth: 40f);
+            RectTransform labelHostRT = labelHost.GetComponent<RectTransform>();
+            if (labelHostRT == null) labelHostRT = labelHost.AddComponent<RectTransform>();
+
+            importSidebarHeaderLabel = CreateImportSidebarLabel(
+                labelHost.transform,
+                FormatSidePanelHeaderLabel(importSidebarOnLeft, SidePanelHeaderTranslation("gallery.import.sidebar_header", "Import")),
+                SidePanelHeaderFontRef);
+            importSidebarHeaderLabel.color = Color.white;
+            importSidebarHeaderLabel.fontStyle = FontStyle.Normal;
+            importSidebarHeaderLabel.alignment = TextAnchor.MiddleCenter;
+            importSidebarHeaderLabel.horizontalOverflow = HorizontalWrapMode.Overflow;
+            importSidebarHeaderLabel.verticalOverflow = VerticalWrapMode.Truncate;
+            StyleImportSidebarHeader();
+
+            float chromeSz = GalleryUiDesignTokens.ButtonSizeRef;
+            GameObject floatBtn = UI.CreateUIButton(
+                header, chromeSz * 1.6f, chromeSz,
+                VPBTranslation.T("gallery.import.detach_short", "Float"),
+                GalleryUiDesignTokens.PopupMenuRowFontRef,
+                0, 0, AnchorPresets.middleCenter,
+                DetachImportSidebar);
+            floatBtn.name = "HeaderFloat";
+            importSidebarHeaderFloatBtnGO = floatBtn;
+            Image floatImg = floatBtn.GetComponent<Image>();
+            if (floatImg != null) floatImg.color = new Color(0.18f, 0.30f, 0.40f, 1f);
+            Text floatTxt = floatBtn.GetComponentInChildren<Text>();
+            if (floatTxt != null)
+            {
+                importSidebarHeaderFloatBtnText = floatTxt;
+                floatTxt.alignment = TextAnchor.MiddleCenter;
+                floatTxt.color = UI.PopupText;
+                try { VPBUiFont.ApplyTo(floatTxt); } catch { }
+            }
+            UI.AddLE(floatBtn, preferredWidth: chromeSz * 1.6f, preferredHeight: chromeSz, flexibleWidth: 0f);
+            AddTooltip(floatBtn, "gallery.import.tip.detach",
+                "Detach as floating window (move / resize). Alt+I toggles.");
+
+            importSidebarHeaderBtn = header.AddComponent<Button>();
+            importSidebarHeaderBtn.targetGraphic = bg;
+            importSidebarHeaderBtn.onClick.AddListener(() => ToggleImportSidebar());
+            AddTooltip(header, "gallery.side.collapse_tip", "Collapse side list");
+
+            GameObject floatBtnC = floatBtn;
+            Text floatTxtC = importSidebarHeaderFloatBtnText;
+            innerPaneScaleActions.Add(s =>
+            {
+                if (floatBtnC == null) return;
+                float sz = GalleryUiDesignTokens.ButtonSizeRef * s;
+                LayoutElement le = floatBtnC.GetComponent<LayoutElement>();
+                if (le != null)
+                {
+                    le.preferredWidth = sz * 1.6f;
+                    le.preferredHeight = sz;
+                }
+                if (floatTxtC != null)
+                    GalleryUiMetrics.ApplyFont(floatTxtC, GalleryUiDesignTokens.PopupMenuRowFontRef, s, GalleryUiDesignTokens.FontMinRef);
+            });
         }
 
         private void EnsureImportSidebarHeaderClickable()
@@ -283,7 +606,12 @@ namespace VPB
             if (importSidebarHeaderLabel == null) return;
             float s = ChromeScale;
             GetImportSidebarContentWidthInsets(s, out _, out _, out float contentWidth);
-            float inner = contentWidth - 4f * s;
+            // Reserve Float button width when docked.
+            float floatReserve = (!importSidebarDetached && importSidebarHeaderFloatBtnGO != null
+                && importSidebarHeaderFloatBtnGO.activeSelf)
+                ? GalleryUiDesignTokens.ButtonSizeRef * 1.6f * s + 8f * s
+                : 0f;
+            float inner = contentWidth - 4f * s - floatReserve;
             if (inner <= 2f) inner = 120f * s;
             importSidebarHeaderLabel.text = EllipsizeTextPreferredWidth(importSidebarHeaderLabel, full ?? "", inner);
         }
@@ -322,33 +650,6 @@ namespace VPB
             return Mathf.Max(0, parent.childCount - 1);
         }
 
-        private void BuildImportSidebarHeader()
-        {
-            GameObject header = UI.CreateChildRT(importSidebarRoot, "Header", AnchorPresets.hStretchTop, new Vector2(0f, ImportSidebarBaseHeaderHeight));
-            importSidebarHeaderRT = header.GetComponent<RectTransform>();
-            importSidebarHeaderRoot = importSidebarHeaderRT;
-
-            // Header tone matches the selected-Category row color so users recognize it as
-            // a side-column header rather than a generic popup chrome.
-            Image bg = AddImportSidebarRoundedBg(header, ImportSidebarHeaderBg);
-
-            importSidebarHeaderLabel = CreateImportSidebarLabel(
-                header.transform,
-                FormatSidePanelHeaderLabel(importSidebarOnLeft, SidePanelHeaderTranslation("gallery.import.sidebar_header", "Import")),
-                SidePanelHeaderFontRef);
-            importSidebarHeaderLabel.color = Color.white;
-            importSidebarHeaderLabel.fontStyle = FontStyle.Normal;
-            importSidebarHeaderLabel.alignment = TextAnchor.MiddleCenter;
-            importSidebarHeaderLabel.horizontalOverflow = HorizontalWrapMode.Overflow;
-            importSidebarHeaderLabel.verticalOverflow = VerticalWrapMode.Truncate;
-            StyleImportSidebarHeader();
-
-            importSidebarHeaderBtn = header.AddComponent<Button>();
-            importSidebarHeaderBtn.targetGraphic = bg;
-            importSidebarHeaderBtn.onClick.AddListener(() => ToggleImportSidebar());
-            AddTooltip(header, "gallery.side.collapse_tip", "Collapse side list");
-        }
-
         // One scroll for the whole body (between the pinned header and pinned Apply): all rows live in its VLG content
         // and scroll as a unit when the panel is short, instead of fixed bands that clip. Insets set in ApplyImportSidebarBaseRect.
         private void BuildImportSidebarBodyScroll()
@@ -374,7 +675,7 @@ namespace VPB
         {
             if (importSidebarScrollContentRT != null)
                 UnityEngine.UI.LayoutRebuilder.ForceRebuildLayoutImmediate(importSidebarScrollContentRT);
-            try { SyncImportSidebarScrollHoverBorders(); } catch { }
+            try { SyncImportSidebarHoverChrome(); } catch { }
         }
 
         private Text CreateImportSidebarLabel(Transform parent, string text, int fontSize)
@@ -461,14 +762,19 @@ namespace VPB
                 else img.color = idle;
             }
             bool categoryGated = importSidebarOpenIntent && !ImportSidebarCategoryAllowed();
-            Apply(leftSceneImportSideBtn, importSidebarActive && importSidebarOnLeft, categoryGated && importSidebarOnLeft);
-            Apply(rightSceneImportSideBtn, importSidebarActive && !importSidebarOnLeft, categoryGated && !importSidebarOnLeft);
+            bool dockedOpen = ImportSidebarOccupiesSideColumn;
+            bool floatOpen = importSidebarActive && importSidebarDetached;
+            Apply(leftSceneImportSideBtn, (dockedOpen && importSidebarOnLeft) || floatOpen, categoryGated && importSidebarOnLeft);
+            Apply(rightSceneImportSideBtn, (dockedOpen && !importSidebarOnLeft) || floatOpen, categoryGated && !importSidebarOnLeft);
 
             void ApplyTooltip(GameObject go, bool gatedSide)
             {
                 if (go == null) return;
                 if (gatedSide)
-                    AddTooltip(go, "gallery.import.sidebar_gated_tip", "Import sidebar opens in Scenes category only");
+                    AddTooltip(go, "gallery.import.sidebar_gated_tip",
+                        "Import needs Scenes — click to switch category and restore");
+                else if (importSidebarDetached && importSidebarOpenIntent)
+                    AddTooltip(go, "gallery.import.tip.float_toggle", "Scene Import floating — click to close; Alt+I toggles float");
                 else
                     AddTooltip(go, "gallery.tooltip.scene_import", "Open the Import sidebar for the selected scene");
             }

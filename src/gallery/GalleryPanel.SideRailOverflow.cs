@@ -16,6 +16,7 @@ namespace VPB
         private RectTransform _rightSideRailOverflowBtnRT;
         private GameObject _sideRailOverflowMenuGO;
         private bool _sideRailOverflowOpen;
+        private bool _sideRailOverflowOpenedFromLeft;
         private readonly List<int> _sideRailOverflowCollapsedIdx = new List<int>(16);
         private float _sideRailFitSpacing = GalleryUiDesignTokens.SideButtonSpacingRef;
         private float _sideRailFitGroupGap;
@@ -35,7 +36,7 @@ namespace VPB
                     GalleryUiDesignTokens.TitleBarOverflowFontRef,
                     0, 0,
                     AnchorPresets.middleCenter,
-                    ToggleSideRailOverflowMenu);
+                    () => ToggleSideRailOverflowMenu(true));
                 _leftSideRailOverflowBtnGO.name = "LeftSideRailOverflowBtn";
                 _leftSideRailOverflowBtnGO.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0.5f);
                 _leftSideRailOverflowBtnRT = _leftSideRailOverflowBtnGO.GetComponent<RectTransform>();
@@ -54,7 +55,7 @@ namespace VPB
                     GalleryUiDesignTokens.TitleBarOverflowFontRef,
                     0, 0,
                     AnchorPresets.middleCenter,
-                    ToggleSideRailOverflowMenu);
+                    () => ToggleSideRailOverflowMenu(false));
                 _rightSideRailOverflowBtnGO.name = "RightSideRailOverflowBtn";
                 _rightSideRailOverflowBtnGO.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0.5f);
                 _rightSideRailOverflowBtnRT = _rightSideRailOverflowBtnGO.GetComponent<RectTransform>();
@@ -73,24 +74,94 @@ namespace VPB
                 Vector2.zero);
         }
 
+        /// <summary>
+        /// Edge pad beyond title / footer bar for side-rail button centers.
+        /// Rails sit on pane edges — do NOT reserve InfoBar/toolbox height (that emptied
+        /// floating/VR rails into "…" while vertical space sat unused beside the strip).
+        /// </summary>
+        private const float SideRailChromeEdgePadRef = 8f;
+
+        /// <summary>
+        /// Free Y band for side-rail button centers (bg-local), and first↔last center span.
+        /// Top = title bar bottom; bottom = footer bar top. Ignores live detail-strip height.
+        /// </summary>
+        private bool TryGetSideRailFreeBand(float scale, out float yMax, out float yMin, out float centerSpan)
+        {
+            yMax = 0f;
+            yMin = 0f;
+            centerSpan = 0f;
+            if (backgroundBoxGO == null) return false;
+            RectTransform bg = backgroundBoxGO.GetComponent<RectTransform>();
+            if (bg == null) return false;
+            float h = bg.rect.height;
+            if (h < 8f) return false;
+            if (scale <= 0f) scale = 1f;
+
+            float half = h * 0.5f;
+            float btnHalf = GalleryUiDesignTokens.SideButtonSquareRef * scale * 0.5f;
+            float pad = SideRailChromeEdgePadRef * scale;
+
+            // Fallback from design tokens when live chrome rects missing.
+            float topEdge = half - GalleryUiDesignTokens.TitleBarHeightRef * scale - pad;
+            float botEdge = -half + GalleryUiDesignTokens.FooterBarHeightRef * scale + pad;
+
+            try
+            {
+                RectTransform titleRT = null;
+                if (titleText != null && titleText.transform != null && titleText.transform.parent != null)
+                    titleRT = titleText.transform.parent as RectTransform;
+                if (titleRT == null && backgroundBoxGO != null)
+                {
+                    Transform t = backgroundBoxGO.transform.Find("TitleBar");
+                    if (t != null) titleRT = t as RectTransform;
+                }
+                if (titleRT != null && titleRT.gameObject.activeInHierarchy)
+                {
+                    Vector3 world = titleRT.TransformPoint(new Vector3(titleRT.rect.center.x, titleRT.rect.yMin, 0f));
+                    topEdge = bg.InverseTransformPoint(world).y - pad;
+                }
+            }
+            catch { }
+
+            try
+            {
+                if (paginationRT != null && paginationRT.gameObject.activeInHierarchy)
+                {
+                    Vector3 world = paginationRT.TransformPoint(new Vector3(paginationRT.rect.center.x, paginationRT.rect.yMax, 0f));
+                    botEdge = bg.InverseTransformPoint(world).y + pad;
+                }
+            }
+            catch { }
+
+            yMax = topEdge - btnHalf;
+            yMin = botEdge + btnHalf;
+            if (yMax < yMin)
+            {
+                float mid = 0.5f * (yMax + yMin);
+                yMax = yMin = mid;
+            }
+            // Room for first↔last center span (total stack extent is span + btnH).
+            float btnH = GalleryUiDesignTokens.SideButtonSquareRef * scale;
+            centerSpan = Mathf.Max(btnH, yMax - yMin);
+            return true;
+        }
+
         private float GetSideRailAvailableCenterSpan(float scale)
         {
-            if (backgroundBoxGO == null) return 400f;
-            RectTransform bg = backgroundBoxGO.GetComponent<RectTransform>();
-            if (bg == null) return 400f;
-            float h = bg.rect.height;
-            if (h < 8f) return 400f;
-            if (scale <= 0f) scale = 1f;
-            // Stable pane chrome only — NOT live InfoBar/detail-strip height.
-            // Detail-strip resize grows the toolbox into the grid; window height is unchanged.
-            // Using GalleryMainAreaBottomInset() here squeezed rail gaps / overflow as the strip grew.
-            float topChrome = (GalleryUiDesignTokens.TitleBarHeightRef + 20f) * scale;
-            float bottomChrome = (GalleryUiDesignTokens.FooterBarHeightRef
-                + GalleryUiDesignTokens.FooterToolboxTopRef
-                + 20f) * scale;
-            float btnH = GalleryUiDesignTokens.SideButtonSquareRef * scale;
-            // Room for first↔last center span (total stack extent is span + btnH).
-            return Mathf.Max(btnH, h - topChrome - bottomChrome - btnH);
+            if (TryGetSideRailFreeBand(scale, out _, out _, out float span))
+                return span;
+            return 400f;
+        }
+
+        /// <summary>Y of first (top) button center so stack sits in free band, not pane center.</summary>
+        private float GetSideRailStackTopY(float stackHeight, float scale)
+        {
+            if (TryGetSideRailFreeBand(scale, out float yMax, out float yMin, out _))
+            {
+                float mid = 0.5f * (yMax + yMin);
+                return mid + stackHeight * 0.5f;
+            }
+            return stackHeight * 0.5f;
         }
 
         private int CountVisibleSideRailButtons()
@@ -124,10 +195,72 @@ namespace VPB
         private void SetSideRailButtonIndexActive(int idx, bool active)
         {
             if (!TryGetSideRailButtonPair(idx, out RectTransform left, out RectTransform right)) return;
-            if (left != null && left.gameObject.activeSelf != active)
-                left.gameObject.SetActive(active);
-            if (right != null && right.gameObject.activeSelf != active)
-                right.gameObject.SetActive(active);
+            // Defense: hide setting means chips absent; never resurrect by name if orphan lingered.
+            bool hideCreator = HideCreatorSideRailButtonsRequested();
+            if (left != null)
+            {
+                bool want = active;
+                if (want && hideCreator && IsCreatorSideRailButtonGO(left.gameObject)) want = false;
+                if (left.gameObject.activeSelf != want) left.gameObject.SetActive(want);
+            }
+            if (right != null)
+            {
+                bool want = active;
+                if (want && hideCreator && IsCreatorSideRailButtonGO(right.gameObject)) want = false;
+                if (right.gameObject.activeSelf != want) right.gameObject.SetActive(want);
+            }
+        }
+
+        /// <summary>Zero rail CanvasGroup alpha while overflow restore/recompute so SetActive churn never paints.</summary>
+        private void RunSideRailOverflowFitQuiet(System.Action fit)
+        {
+            if (fit == null) return;
+            int n = sideButtonGroups != null ? sideButtonGroups.Count : 0;
+            // Reuse scratch: max 2 side rails in practice; cap avoids alloc on warm path.
+            const int MaxQuiet = 4;
+            float a0 = 0f, a1 = 0f, a2 = 0f, a3 = 0f;
+            CanvasGroup g0 = null, g1 = null, g2 = null, g3 = null;
+            int saved = 0;
+            for (int i = 0; i < n && saved < MaxQuiet; i++)
+            {
+                CanvasGroup cg = sideButtonGroups[i];
+                if (cg == null) continue;
+                if (saved == 0) { g0 = cg; a0 = cg.alpha; }
+                else if (saved == 1) { g1 = cg; a1 = cg.alpha; }
+                else if (saved == 2) { g2 = cg; a2 = cg.alpha; }
+                else { g3 = cg; a3 = cg.alpha; }
+                cg.alpha = 0f;
+                saved++;
+            }
+            CanvasGroup footerCg = null;
+            float footerA = 1f;
+            if (_footerSideButtonsGroupGO != null && _footerSideButtonsGroupGO.activeSelf)
+            {
+                footerCg = _footerSideButtonsGroupGO.GetComponent<CanvasGroup>();
+                if (footerCg == null) footerCg = _footerSideButtonsGroupGO.AddComponent<CanvasGroup>();
+                footerA = footerCg.alpha;
+                footerCg.alpha = 0f;
+            }
+            try { fit(); }
+            finally
+            {
+                if (g0 != null) g0.alpha = a0;
+                if (g1 != null) g1.alpha = a1;
+                if (g2 != null) g2.alpha = a2;
+                if (g3 != null) g3.alpha = a3;
+                if (footerCg != null) footerCg.alpha = footerA;
+                // Re-assert intended side alpha (fade timer / transparency).
+                try
+                {
+                    for (int i = 0; i < n; i++)
+                    {
+                        CanvasGroup cg = sideButtonGroups[i];
+                        if (cg != null && cg.alpha != sideButtonsAlpha)
+                            cg.alpha = sideButtonsAlpha;
+                    }
+                }
+                catch { }
+            }
         }
 
         private bool IsSideRailFloatingIndex(int idx)
@@ -169,72 +302,74 @@ namespace VPB
         {
             EnsureSideRailOverflowChrome();
 
-            spacing = GalleryUiDesignTokens.SideButtonSpacingRef * scale;
-            groupGap = (VPBConfig.Instance != null && VPBConfig.Instance.EnableButtonGaps)
+            float spacingLocal = GalleryUiDesignTokens.SideButtonSpacingRef * scale;
+            float groupGapLocal = (VPBConfig.Instance != null && VPBConfig.Instance.EnableButtonGaps)
                 ? GalleryUiDesignTokens.SideButtonGroupGapRef * scale
                 : 0f;
 
-            // Restore prior overflow hides, then re-apply normal visibility rules.
-            if (_sideRailOverflowCollapsedIdx.Count > 0)
+            // Restore→re-collapse SetActive churn must not paint (fixed dock / collapse refresh flash).
+            RunSideRailOverflowFitQuiet(() =>
             {
-                for (int i = 0; i < _sideRailOverflowCollapsedIdx.Count; i++)
-                    SetSideRailButtonIndexActive(_sideRailOverflowCollapsedIdx[i], true);
-                _sideRailOverflowCollapsedIdx.Clear();
-                try { UpdateSideButtonsVisibility(); } catch { }
-                try { SyncSideFollowRailButtonsVisibility(); } catch { }
-            }
-
-            if (_leftSideRailOverflowBtnGO != null) _leftSideRailOverflowBtnGO.SetActive(false);
-            if (_rightSideRailOverflowBtnGO != null) _rightSideRailOverflowBtnGO.SetActive(false);
-
-            float avail = GetSideRailAvailableCenterSpan(scale);
-            float btnH = GalleryUiDesignTokens.SideButtonSquareRef * scale;
-            float stack = GetSideButtonsStackHeight(spacing, groupGap);
-
-            // Phase 1: close zone/group gaps.
-            if (stack > avail + 0.5f)
-                groupGap = 0f;
-
-            stack = GetSideButtonsStackHeight(spacing, groupGap);
-
-            // Phase 2: squeeze base spacing down to flush (centers spaced by button height).
-            float minSpacing = btnH;
-            if (stack > avail + 0.5f)
-            {
-                int n = CountVisibleSideRailButtons();
-                if (n > 1)
+                if (_sideRailOverflowCollapsedIdx.Count > 0)
                 {
-                    float tight = avail / (n - 1);
-                    spacing = Mathf.Clamp(tight, minSpacing, spacing);
+                    for (int i = 0; i < _sideRailOverflowCollapsedIdx.Count; i++)
+                        SetSideRailButtonIndexActive(_sideRailOverflowCollapsedIdx[i], true);
+                    _sideRailOverflowCollapsedIdx.Clear();
+                    try { UpdateSideButtonsVisibility(); } catch { }
+                    try { SyncSideFollowRailButtonsVisibility(); } catch { }
                 }
-            }
 
-            stack = GetSideButtonsStackHeight(spacing, groupGap);
+                if (_leftSideRailOverflowBtnGO != null) _leftSideRailOverflowBtnGO.SetActive(false);
+                if (_rightSideRailOverflowBtnGO != null) _rightSideRailOverflowBtnGO.SetActive(false);
 
-            // Phase 3: collapse into … (account for … slot once any chip is hidden).
-            while (true)
-            {
-                bool showOv = _sideRailOverflowCollapsedIdx.Count > 0;
-                float need = stack;
-                if (showOv) need += spacing; // one extra step for …
-                if (need <= avail + 0.5f) break;
+                float avail = GetSideRailAvailableCenterSpan(scale);
+                float btnH = GalleryUiDesignTokens.SideButtonSquareRef * scale;
+                float stack = GetSideButtonsStackHeight(spacingLocal, groupGapLocal);
 
-                int hideIdx = PickNextSideRailCollapseIndex();
-                if (hideIdx < 0) break;
-                SetSideRailButtonIndexActive(hideIdx, false);
-                _sideRailOverflowCollapsedIdx.Add(hideIdx);
-                stack = GetSideButtonsStackHeight(spacing, groupGap);
-            }
+                if (stack > avail + 0.5f)
+                    groupGapLocal = 0f;
 
-            bool showOverflow = _sideRailOverflowCollapsedIdx.Count > 0;
-            if (_leftSideRailOverflowBtnGO != null)
-                _leftSideRailOverflowBtnGO.SetActive(showOverflow && leftSideContainer != null && leftSideContainer.activeSelf);
-            if (_rightSideRailOverflowBtnGO != null)
-                _rightSideRailOverflowBtnGO.SetActive(showOverflow && rightSideContainer != null && rightSideContainer.activeSelf);
+                stack = GetSideButtonsStackHeight(spacingLocal, groupGapLocal);
 
-            if (!showOverflow)
-                CloseSideRailOverflowMenu();
+                float minSpacing = btnH;
+                if (stack > avail + 0.5f)
+                {
+                    int n = CountVisibleSideRailButtons();
+                    if (n > 1)
+                    {
+                        float tight = avail / (n - 1);
+                        spacingLocal = Mathf.Clamp(tight, minSpacing, spacingLocal);
+                    }
+                }
 
+                stack = GetSideButtonsStackHeight(spacingLocal, groupGapLocal);
+
+                while (true)
+                {
+                    bool showOv = _sideRailOverflowCollapsedIdx.Count > 0;
+                    float need = stack;
+                    if (showOv) need += spacingLocal;
+                    if (need <= avail + 0.5f) break;
+
+                    int hideIdx = PickNextSideRailCollapseIndex();
+                    if (hideIdx < 0) break;
+                    SetSideRailButtonIndexActive(hideIdx, false);
+                    _sideRailOverflowCollapsedIdx.Add(hideIdx);
+                    stack = GetSideButtonsStackHeight(spacingLocal, groupGapLocal);
+                }
+
+                bool showOverflow = _sideRailOverflowCollapsedIdx.Count > 0;
+                if (_leftSideRailOverflowBtnGO != null)
+                    _leftSideRailOverflowBtnGO.SetActive(showOverflow && leftSideContainer != null && leftSideContainer.activeSelf);
+                if (_rightSideRailOverflowBtnGO != null)
+                    _rightSideRailOverflowBtnGO.SetActive(showOverflow && rightSideContainer != null && rightSideContainer.activeSelf);
+
+                if (!showOverflow)
+                    CloseSideRailOverflowMenu();
+            });
+
+            spacing = spacingLocal;
+            groupGap = groupGapLocal;
             _sideRailFitSpacing = spacing;
             _sideRailFitGroupGap = groupGap;
         }
@@ -287,23 +422,25 @@ namespace VPB
             {
                 int idx = _sideRailOverflowCollapsedIdx[i];
                 if (!TryGetSideRailButtonPair(idx, out RectTransform left, out RectTransform right)) continue;
-                GameObject go = left != null ? left.gameObject : (right != null ? right.gameObject : null);
-                if (go == null) continue;
+                GameObject invokeGo = _sideRailOverflowOpenedFromLeft
+                    ? (left != null ? left.gameObject : (right != null ? right.gameObject : null))
+                    : (right != null ? right.gameObject : (left != null ? left.gameObject : null));
+                if (invokeGo == null) continue;
 
-                string label = ResolveSideRailOverflowLabel(go);
-                Sprite icon = UI.GetButtonIconSprite(go);
-                GameObject invokeGo = go;
+                string label = ResolveSideRailOverflowLabel(invokeGo);
+                Sprite icon = UI.GetButtonIconSprite(invokeGo);
+                GameObject capturedInvoke = invokeGo;
                 GameObject row = UI.AddStretchPopupMenuRow(panel, label, () =>
                 {
                     CloseSideRailOverflowMenu();
                     try
                     {
-                        Button b = invokeGo.GetComponent<Button>();
+                        Button b = capturedInvoke.GetComponent<Button>();
                         if (b != null) b.onClick.Invoke();
                     }
                     catch { }
                 }, icon: icon);
-                if (row != null && TryResolveSideRailOverflowTooltip(go, out string tipKey, out string tipDefault))
+                if (row != null && TryResolveSideRailOverflowTooltip(invokeGo, out string tipKey, out string tipDefault))
                     AddTooltip(row, tipKey, tipDefault);
             }
         }
@@ -356,6 +493,13 @@ namespace VPB
             {
                 tipKey = "gallery.tooltip.remove_mode";
                 tipDefault = "Remove Item Mode: point at an item to fade it, click to remove. Also opens the remove list siderail for clothing/hair/scene.";
+                return true;
+            }
+            if (SideRailGoIs(go, leftCreatorModeSideBtn, rightCreatorModeSideBtn)
+                || SideRailGoMatchesIcon(go, leftCreatorModeBtnIconImage, rightCreatorModeBtnIconImage))
+            {
+                tipKey = "gallery.tooltip.creator_mode";
+                tipDefault = "Scene Tools — sticky scene authoring (Strip Scene, …). Not the Creators author list. Ctrl+Shift+K. Esc exits.";
                 return true;
             }
             if (SideRailGoIs(go, leftRemoveAtomBtn, rightRemoveAtomBtn)
@@ -424,14 +568,17 @@ namespace VPB
             if (SideRailGoIs(go, leftUserTagsSideBtn, rightUserTagsSideBtn))
                 return VPBTranslation.T("gallery.side.overflow_tags", "User Tags");
             if (SideRailGoIs(go, leftRemoveModeSideBtn, rightRemoveModeSideBtn))
-                return VPBTranslation.T("gallery.side.overflow_remove_mode", "Remove mode");
+                return VPBTranslation.T("gallery.side.overflow_remove_mode", "Scene Eraser");
+            if (SideRailGoIs(go, leftCreatorModeSideBtn, rightCreatorModeSideBtn)
+                || SideRailGoMatchesIcon(go, leftCreatorModeBtnIconImage, rightCreatorModeBtnIconImage))
+                return VPBTranslation.T("gallery.side.overflow_creator_mode", "Scene Tools");
             if (SideRailGoIs(go, leftRemoveAtomBtn, rightRemoveAtomBtn)
                 || SideRailGoMatchesIcon(go, leftRemoveAtomBtnIconImage, rightRemoveAtomBtnIconImage))
-                return VPBTranslation.T("gallery.side.overflow_remove", "Remove");
+                return VPBTranslation.T("gallery.side.overflow_remove", "Unequip");
             if (SideRailGoIs(go, leftRemoveAllClothingBtn, rightRemoveAllClothingBtn))
-                return VPBTranslation.T("gallery.side.overflow_remove_clothing", "Remove clothing");
+                return VPBTranslation.T("gallery.side.overflow_remove_clothing", "Unequip clothing");
             if (SideRailGoIs(go, leftRemoveAllHairBtn, rightRemoveAllHairBtn))
-                return VPBTranslation.T("gallery.side.overflow_remove_hair", "Remove hair");
+                return VPBTranslation.T("gallery.side.overflow_remove_hair", "Unequip hair");
             if (SideRailGoMatches(go, leftCategoryBtnImage, rightCategoryBtnImage, leftCategoryBtnText, rightCategoryBtnText))
                 return VPBTranslation.T("gallery.side.overflow_category", "Category");
             if (SideRailGoMatches(go, leftCreatorBtnImage, rightCreatorBtnImage, leftCreatorBtnText, rightCreatorBtnText))
@@ -489,12 +636,13 @@ namespace VPB
                 || SideRailGoIs(go, textA, textB);
         }
 
-        private void ToggleSideRailOverflowMenu()
+        private void ToggleSideRailOverflowMenu(bool fromLeftRail)
         {
             if (_sideRailOverflowMenuGO == null) return;
             _sideRailOverflowOpen = !_sideRailOverflowOpen;
             if (_sideRailOverflowOpen)
             {
+                _sideRailOverflowOpenedFromLeft = fromLeftRail;
                 Transform panel = _sideRailOverflowMenuGO.transform.Find("OverflowMenuPanel");
                 if (panel != null) RebuildSideRailOverflowMenuRows(panel);
                 try { RescaleSideRailOverflowMenuInternal(ChromeScale); } catch { }
@@ -515,11 +663,16 @@ namespace VPB
             RectTransform overlayRT = _sideRailOverflowMenuGO.GetComponent<RectTransform>();
             if (overlayRT == null) return;
 
-            RectTransform anchor = null;
-            if (_rightSideRailOverflowBtnRT != null && _rightSideRailOverflowBtnGO != null && _rightSideRailOverflowBtnGO.activeSelf)
-                anchor = _rightSideRailOverflowBtnRT;
-            else if (_leftSideRailOverflowBtnRT != null && _leftSideRailOverflowBtnGO != null && _leftSideRailOverflowBtnGO.activeSelf)
-                anchor = _leftSideRailOverflowBtnRT;
+            RectTransform anchor = _sideRailOverflowOpenedFromLeft
+                ? _leftSideRailOverflowBtnRT
+                : _rightSideRailOverflowBtnRT;
+            if (anchor == null || anchor.gameObject == null || !anchor.gameObject.activeSelf)
+            {
+                if (_rightSideRailOverflowBtnRT != null && _rightSideRailOverflowBtnGO != null && _rightSideRailOverflowBtnGO.activeSelf)
+                    anchor = _rightSideRailOverflowBtnRT;
+                else if (_leftSideRailOverflowBtnRT != null && _leftSideRailOverflowBtnGO != null && _leftSideRailOverflowBtnGO.activeSelf)
+                    anchor = _leftSideRailOverflowBtnRT;
+            }
             if (anchor == null) return;
 
             float s = ChromeScale <= 0f ? 1f : ChromeScale;
@@ -583,57 +736,60 @@ namespace VPB
             if (buttonList == null || layout == null) return;
             EnsureSideRailOverflowChrome();
 
-            if (_sideRailOverflowCollapsedIdx.Count > 0)
-            {
-                for (int i = 0; i < _sideRailOverflowCollapsedIdx.Count; i++)
-                    SetSideRailButtonIndexActive(_sideRailOverflowCollapsedIdx[i], true);
-                _sideRailOverflowCollapsedIdx.Clear();
-                try { UpdateSideButtonsVisibility(); } catch { }
-                try { SyncSideFollowRailButtonsVisibility(); } catch { }
-            }
-
-            if (_leftSideRailOverflowBtnGO != null) _leftSideRailOverflowBtnGO.SetActive(false);
-            if (_rightSideRailOverflowBtnGO != null) _rightSideRailOverflowBtnGO.SetActive(false);
-
             float rowGap = 10f * s;
-            float MeasureRow(float g)
+            RunSideRailOverflowFitQuiet(() =>
             {
-                int n = 0;
-                for (int i = 0; i < layout.Length; i++)
+                if (_sideRailOverflowCollapsedIdx.Count > 0)
                 {
-                    int idx = layout[i].buttonIndex;
-                    if (idx < 0 || idx >= buttonList.Count) continue;
-                    if (_sideRailOverflowCollapsedIdx.Contains(idx)) continue;
-                    RectTransform rt = buttonList[idx];
-                    if (rt == null || !rt.gameObject.activeSelf) continue;
-                    n++;
+                    for (int i = 0; i < _sideRailOverflowCollapsedIdx.Count; i++)
+                        SetSideRailButtonIndexActive(_sideRailOverflowCollapsedIdx[i], true);
+                    _sideRailOverflowCollapsedIdx.Clear();
+                    try { UpdateSideButtonsVisibility(); } catch { }
+                    try { SyncSideFollowRailButtonsVisibility(); } catch { }
                 }
-                if (_sideRailOverflowCollapsedIdx.Count > 0) n++; // …
-                if (n <= 0) return 0f;
-                return n * btnSz + (n - 1) * g;
-            }
 
-            if (MeasureRow(rowGap) > availW + 0.5f)
-                rowGap = 0f;
+                if (_leftSideRailOverflowBtnGO != null) _leftSideRailOverflowBtnGO.SetActive(false);
+                if (_rightSideRailOverflowBtnGO != null) _rightSideRailOverflowBtnGO.SetActive(false);
 
-            while (MeasureRow(rowGap) > availW + 0.5f)
-            {
-                int hideIdx = PickNextSideRailCollapseIndex();
-                if (hideIdx < 0) break;
-                SetSideRailButtonIndexActive(hideIdx, false);
-                _sideRailOverflowCollapsedIdx.Add(hideIdx);
-            }
+                if (MeasureTopDockSideButtonRowWidth(buttonList, layout, btnSz, rowGap) > availW + 0.5f)
+                    rowGap = 0f;
+
+                while (MeasureTopDockSideButtonRowWidth(buttonList, layout, btnSz, rowGap) > availW + 0.5f)
+                {
+                    int hideIdx = PickNextSideRailCollapseIndex();
+                    if (hideIdx < 0) break;
+                    SetSideRailButtonIndexActive(hideIdx, false);
+                    _sideRailOverflowCollapsedIdx.Add(hideIdx);
+                }
+
+                bool showOverflow = _sideRailOverflowCollapsedIdx.Count > 0;
+                if (showOverflow && _leftSideRailOverflowBtnGO != null && _footerSideButtonsGroupRT != null)
+                {
+                    if (_leftSideRailOverflowBtnRT.parent != _footerSideButtonsGroupRT)
+                        _leftSideRailOverflowBtnRT.SetParent(_footerSideButtonsGroupRT, worldPositionStays: false);
+                    _leftSideRailOverflowBtnGO.SetActive(true);
+                }
+            });
 
             gap = rowGap;
+        }
 
-            bool showOverflow = _sideRailOverflowCollapsedIdx.Count > 0;
-            // Reparent left overflow chip into footer side group for top dock.
-            if (showOverflow && _leftSideRailOverflowBtnGO != null && _footerSideButtonsGroupRT != null)
+        private float MeasureTopDockSideButtonRowWidth(List<RectTransform> buttonList, SideButtonLayoutEntry[] layout, float btnSz, float g)
+        {
+            if (buttonList == null || layout == null) return 0f;
+            int n = 0;
+            for (int i = 0; i < layout.Length; i++)
             {
-                if (_leftSideRailOverflowBtnRT.parent != _footerSideButtonsGroupRT)
-                    _leftSideRailOverflowBtnRT.SetParent(_footerSideButtonsGroupRT, worldPositionStays: false);
-                _leftSideRailOverflowBtnGO.SetActive(true);
+                int idx = layout[i].buttonIndex;
+                if (idx < 0 || idx >= buttonList.Count) continue;
+                if (_sideRailOverflowCollapsedIdx.Contains(idx)) continue;
+                RectTransform rt = buttonList[idx];
+                if (rt == null || !rt.gameObject.activeSelf) continue;
+                n++;
             }
+            if (_sideRailOverflowCollapsedIdx.Count > 0) n++; // …
+            if (n <= 0) return 0f;
+            return n * btnSz + (n - 1) * g;
         }
     }
 }

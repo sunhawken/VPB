@@ -102,6 +102,7 @@ namespace VPB
             Redo,
             Hub,
             Cleanup,
+            CreatorMode,
             ReplaceAddToggle,
             CompressCache,
             AutoHideGallery,
@@ -173,6 +174,9 @@ namespace VPB
         private Image m_QmTooltipBackdrop;
         private string m_QmTooltipCurrent;
         private int m_QmTooltipHoverSlotIdx = -1;
+        // Same principle as gallery sticky tips: instant show, hide grace only (no fade).
+        private bool m_QmTooltipHidePending;
+        private float m_QmTooltipHideAt;
 
         private float m_QmFpsLastLabelUpdateTime = -999f;
         private string m_QmFpsCachedLabel = "";
@@ -386,6 +390,7 @@ namespace VPB
             m_QmTooltipText = t;
 
             // Start fully hidden (no backdrop shown until we have a message).
+            m_QmTooltipHidePending = false;
             QuickMenuUpdateTooltipVisual(forceHide: true);
         }
 
@@ -432,7 +437,11 @@ namespace VPB
         private void QuickMenuSetTooltip(string msg)
         {
             if (m_QmTooltipText == null) return;
-            m_QmTooltipCurrent = msg ?? "";
+            m_QmTooltipHidePending = false;
+            string next = msg ?? "";
+            // Skip layout rebuild when text unchanged (hide-grace cancel / same tip).
+            if (m_QmTooltipCurrent == next) return;
+            m_QmTooltipCurrent = next;
             m_QmTooltipText.text = m_QmTooltipCurrent;
             QuickMenuUpdateTooltipVisual();
         }
@@ -446,9 +455,25 @@ namespace VPB
                 QuickMenuSetTooltip(VPBTranslation.T("hook.qmtooltip.drag_assign", "Edit mode: drag an action from the list and drop it on a slot to assign."));
                 return;
             }
+            if (string.IsNullOrEmpty(m_QmTooltipCurrent))
+            {
+                m_QmTooltipHidePending = false;
+                return;
+            }
+            // Instant show stays; only clear is deferred (adjacent slot scrub).
+            m_QmTooltipHidePending = true;
+            m_QmTooltipHideAt = Time.unscaledTime + GalleryUiDesignTokens.TooltipHideGraceSec;
+        }
+
+        private void QuickMenuAdvanceTooltipHide()
+        {
+            if (!m_QmTooltipHidePending) return;
+            if (Time.unscaledTime < m_QmTooltipHideAt) return;
+            m_QmTooltipHidePending = false;
+            if (m_QmTooltipText == null) return;
             m_QmTooltipCurrent = "";
             m_QmTooltipText.text = "";
-            QuickMenuUpdateTooltipVisual();
+            QuickMenuUpdateTooltipVisual(forceHide: true);
         }
 
         private string QuickMenuGetTooltipForSlot(int idx)
@@ -481,6 +506,7 @@ namespace VPB
                 case QuickMenuAssignableAction.Redo: return VPBTranslation.T("hook.qmbutton.redo", "Redo");
                 case QuickMenuAssignableAction.Hub: return VPBTranslation.T("hook.qmbutton.hub", "Hub");
                 case QuickMenuAssignableAction.Cleanup: return VPBTranslation.T("hook.qmbutton.cleanup", "Cleanup");
+                case QuickMenuAssignableAction.CreatorMode: return VPBTranslation.T("hook.qmtooltip.creator_mode", "Scene Tools — sticky scene authoring tools. Ctrl+Shift+K. Esc exits.");
                 case QuickMenuAssignableAction.ReplaceAddToggle: return VPBTranslation.T("hook.qmbutton.replace_add", "Replace/Add");
                 case QuickMenuAssignableAction.CompressCache: return VPBTranslation.T("hook.qmbutton.compress_cache", "Compress Cache");
                 case QuickMenuAssignableAction.AutoHideGallery: return VPBTranslation.T("hook.qmbutton.autohide", "Auto-Hide");
@@ -510,7 +536,7 @@ namespace VPB
                 case QuickMenuAssignableAction.RemoveAllClothing: return VPBTranslation.T("hook.qmbutton.remove_all_clothing", "Remove All Clothing");
                 case QuickMenuAssignableAction.RemoveAllHair: return VPBTranslation.T("hook.qmbutton.remove_all_hair", "Remove All Hair");
                 case QuickMenuAssignableAction.ToggleImportSidebar: return VPBTranslation.T("hook.qmbutton.toggle_import_sidebar", "Toggle Import Sidebar");
-                case QuickMenuAssignableAction.StarFilter: return VPBTranslation.T("hook.qmbutton.star_filter", "Star Filter (Rated Only)");
+                case QuickMenuAssignableAction.StarFilter: return VPBTranslation.T("hook.qmbutton.star_filter", "Star Filter (Rated / Not rated)");
                 case QuickMenuAssignableAction.OpenCategorySkin: return VPBTranslation.T("hook.qmbutton.open_category_skin", "Open Category: Skin");
                 case QuickMenuAssignableAction.PerfStepUp: return VPBTranslation.T("hook.qmbutton.perf_step_up", "Perf Step Up");
                 case QuickMenuAssignableAction.PerfStepDown: return VPBTranslation.T("hook.qmbutton.perf_step_down", "Perf Step Down");
@@ -626,6 +652,7 @@ namespace VPB
                 case QuickMenuAssignableAction.Redo: return "redo";
                 case QuickMenuAssignableAction.Hub: return "hub";
                 case QuickMenuAssignableAction.Cleanup: return "cleanup";
+                case QuickMenuAssignableAction.CreatorMode: return "creator_mode";
                 case QuickMenuAssignableAction.ReplaceAddToggle: return "replace_add_toggle";
                 case QuickMenuAssignableAction.CompressCache: return "compress_cache";
                 case QuickMenuAssignableAction.AutoHideGallery: return "autohide_gallery";
@@ -682,6 +709,9 @@ namespace VPB
                 case "redo": return QuickMenuAssignableAction.Redo;
                 case "hub": return QuickMenuAssignableAction.Hub;
                 case "cleanup": return QuickMenuAssignableAction.Cleanup;
+                case "creator_mode":
+                case "strip_scene": // legacy id from one-click Strip assignment
+                    return QuickMenuAssignableAction.CreatorMode;
                 case "replace_add_toggle": return QuickMenuAssignableAction.ReplaceAddToggle;
                 case "compress_cache": return QuickMenuAssignableAction.CompressCache;
                 case "autohide_gallery": return QuickMenuAssignableAction.AutoHideGallery;
@@ -1309,6 +1339,9 @@ namespace VPB
                 case QuickMenuAssignableAction.Cleanup:
                     icon = m_QmIconCleanup;
                     break;
+                case QuickMenuAssignableAction.CreatorMode:
+                    icon = m_QmIconHexClothing ?? m_QmIconHexScene ?? m_QmIconCleanup;
+                    break;
                 case QuickMenuAssignableAction.ReplaceAddToggle:
                 {
                     bool replace = false;
@@ -1578,6 +1611,16 @@ namespace VPB
                         p = QuickMenuGetTargetPanel();
                         if (p != null) p.QuickMenu_ToggleCleanupMode();
                     }
+                    break;
+                }
+                case QuickMenuAssignableAction.CreatorMode:
+                {
+                    var p = QuickMenuGetTargetPanel();
+                    if (p == null) { OpenGallery(); p = QuickMenuGetTargetPanel(); }
+                    if (p != null) p.QuickMenu_ToggleCreatorMode();
+                    for (int i = 0; i < QuickMenuGridSlotCount; i++)
+                        if (QuickMenuGetSlotAction(i) == QuickMenuAssignableAction.CreatorMode)
+                            QuickMenuRefreshSlotVisual(i);
                     break;
                 }
                 case QuickMenuAssignableAction.ReplaceAddToggle:
@@ -1924,6 +1967,7 @@ namespace VPB
                 QuickMenuAssignableAction.Redo,
                 QuickMenuAssignableAction.Hub,
                 QuickMenuAssignableAction.Cleanup,
+                QuickMenuAssignableAction.CreatorMode,
                 QuickMenuAssignableAction.TargetAtom,
                 QuickMenuAssignableAction.ReplaceAddToggle,
                 QuickMenuAssignableAction.CompressCache,
@@ -1956,6 +2000,7 @@ namespace VPB
                 VPBTranslation.T("hook.qmbutton.redo", "Redo"),
                 VPBTranslation.T("hook.qmbutton.hub", "Hub"),
                 VPBTranslation.T("hook.qmbutton.cleanup", "Cleanup"),
+                VPBTranslation.T("hook.qmbutton.creator_mode", "Scene Tools"),
                 VPBTranslation.T("hook.qmbutton.target_atom", "Target Atom"),
                 VPBTranslation.T("hook.qmbutton.replace_add", "Replace/Add"),
                 VPBTranslation.T("hook.qmbutton.compress_cache", "Compress Cache"),
@@ -2374,6 +2419,7 @@ namespace VPB
                 case QuickMenuAssignableAction.Redo: return m_QmIconRedo;
                 case QuickMenuAssignableAction.Hub: return m_QmIconHub;
                 case QuickMenuAssignableAction.Cleanup: return m_QmIconCleanup;
+                case QuickMenuAssignableAction.CreatorMode: return m_QmIconHexClothing ?? m_QmIconHexScene ?? m_QmIconCleanup;
                 case QuickMenuAssignableAction.ReplaceAddToggle: return m_QmIconReplace ?? m_QmIconAdd;
                 case QuickMenuAssignableAction.CompressCache: return m_QmIconCompressCache;
                 case QuickMenuAssignableAction.AutoHideGallery: return m_QmIconAutoHideOff ?? m_QmIconAutoHideOn;

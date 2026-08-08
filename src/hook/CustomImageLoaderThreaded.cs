@@ -637,7 +637,7 @@ namespace VPB
 								{
 	                                try { debugStage = 20; debugStageAux = 0; debugStageRealtime = Time.realtimeSinceStartup; } catch { }
 	                                bool isVarPath = false;
-	                                try { isVarPath = imgPath != null && imgPath.IndexOf(":/", StringComparison.Ordinal) > 0; } catch { isVarPath = false; }
+	                                try { isVarPath = IsVarPackageVfsPath(imgPath); } catch { isVarPath = false; }
 
 	                                if (isThumbnail && isVarPath)
 	                                {
@@ -1635,6 +1635,8 @@ namespace VPB
         private static bool IsVarPackageVfsPath(string imgPath)
         {
             if (string.IsNullOrEmpty(imgPath)) return false;
+            // Windows drive abs paths contain ":/" (C:/...) — not VaM pkg:/internal.
+            if (LocalSceneGallerySupport.IsWindowsDriveAbsolutePath(imgPath)) return false;
             return imgPath.IndexOf(":/", StringComparison.Ordinal) > 0;
         }
 
@@ -1857,6 +1859,45 @@ namespace VPB
 		protected int progressMax;
 
 		protected AsyncFlag loadFlag;
+
+		/// <summary>
+		/// Clear stuck progress HUD / counters after bulk scene teardown.
+		/// Warm/cold only — not for Update.
+		/// </summary>
+		public void ForceResetLoadingProgress(string reason = null)
+		{
+			try
+			{
+				numRealQueuedImages = 0;
+				progress = 0;
+				progressMax = 0;
+				if (progressHUD != null)
+					progressHUD.SetActive(false);
+				if (loadFlag != null)
+				{
+					try { loadFlag.Raise(); } catch { }
+					loadFlag = null;
+				}
+				if (queuedImages != null)
+				{
+					while (queuedImages.Count > 0)
+					{
+						QueuedImage qi = null;
+						try { qi = queuedImages.Dequeue(); } catch { break; }
+						if (qi != null)
+						{
+							try { qi.cancel = true; } catch { }
+						}
+					}
+				}
+				LogUtil.LogWarning("[VPB] CustomImageLoader ForceResetLoadingProgress"
+					+ (string.IsNullOrEmpty(reason) ? "" : " (" + reason + ")"));
+			}
+			catch (Exception ex)
+			{
+				LogUtil.LogWarning("[VPB] ForceResetLoadingProgress failed: " + ex.Message);
+			}
+		}
 
 		public bool RegisterTextureUse(Texture2D tex)
 		{

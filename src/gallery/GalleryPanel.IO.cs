@@ -680,10 +680,8 @@ namespace VPB
                 FileEntry e = source[i];
                 if (e == null) continue;
 
-                if (isRatingSortToggleEnabled)
-                {
-                    try { if (RatingsManager.Instance.GetRating(e) <= 0) continue; } catch { continue; }
-                }
+                if (!PassesLiveStarFilters(e))
+                    continue;
 
                 if (!needSearch)
                 {
@@ -1481,7 +1479,8 @@ namespace VPB
         {
             if (entry == null) return false;
 
-            // History: skip category-only filters (rating/size/source); keep path filter, search, tags.
+            // History: skip size/source category filters; keep path, search, tags, and live ★ filters
+            // (presence + star-count) so title-bar ★ matches visible History rows.
             if (activeContentType == ContentType.History)
             {
                 if (!string.IsNullOrEmpty(currentPackagePathFilter))
@@ -1490,6 +1489,8 @@ namespace VPB
                     if (!GalleryPathFilterMatchesFolder(folder, currentPackagePathFilter))
                         return false;
                 }
+                if (!PassesLiveStarFilters(entry))
+                    return false;
                 if (HasActiveNameFilter())
                 {
                     bool skipSqlOwned = nameFilterQuery.RequiresSqlRefresh && IsGallerySqlIndexedSearchEntry(entry);
@@ -1625,19 +1626,12 @@ namespace VPB
                 }
             }
 
-            // Rating/Size filters
-            if (!string.IsNullOrEmpty(currentRatingFilter))
-            {
-                // Rating filter when status is NOT set (or even if it is, as an additional filter)
-                int rating = RatingsManager.Instance.GetRating(entry);
-                if (currentRatingFilter == "All Ratings") { if (rating <= 0) return false; }
-                else if (currentRatingFilter == "5 Stars") { if (rating != 5) return false; }
-                else if (currentRatingFilter == "4 Stars") { if (rating != 4) return false; }
-                else if (currentRatingFilter == "3 Stars") { if (rating != 3) return false; }
-                else if (currentRatingFilter == "2 Stars") { if (rating != 2) return false; }
-                else if (currentRatingFilter == "1 Star") { if (rating != 1) return false; }
-                else if (currentRatingFilter == "No Ratings") { if (rating != 0) return false; }
-            }
+            // Rating: star-count tab + title-bar ★ presence (one GetRating).
+            if (!PassesLiveStarFilters(entry))
+                return false;
+
+            if (HasLicenseFilter() && !PassesLicenseFilter(entry))
+                return false;
 
             if (!string.IsNullOrEmpty(currentSizeFilter))
             {
@@ -1834,19 +1828,24 @@ namespace VPB
             StopCo(ref _appearanceLooseMergeCo);
             StopCo(ref _historyModeCountsCo);
             StopCo(ref _earlyMetaApplyCoroutine);
-            // Rotate the group ID here (synchronously) so that any in-flight thumbnail callbacks
-            // from the old category fail the capturedGroupId == currentLoadingGroupId guard and
-            // don't pollute the new session. The coroutine's yield-return-null would be too late.
-            if (!string.IsNullOrEmpty(currentLoadingGroupId) && CustomImageLoaderThreaded.singleton != null)
-                CustomImageLoaderThreaded.singleton.CancelGroup(currentLoadingGroupId);
-            currentLoadingGroupId = Guid.NewGuid().ToString();
+            // Quiet background refresh keeps visible thumbs; do not cancel the active image group.
+            if (!_quietGalleryRefresh)
+            {
+                // Rotate the group ID here (synchronously) so that any in-flight thumbnail callbacks
+                // from the old category fail the capturedGroupId == currentLoadingGroupId guard and
+                // don't pollute the new session. The coroutine's yield-return-null would be too late.
+                if (!string.IsNullOrEmpty(currentLoadingGroupId) && CustomImageLoaderThreaded.singleton != null)
+                    CustomImageLoaderThreaded.singleton.CancelGroup(currentLoadingGroupId);
+                currentLoadingGroupId = Guid.NewGuid().ToString();
+            }
             unchecked { _deferredSubPaneSessionId++; }
             System.Threading.Interlocked.Increment(ref galleryFileRefreshSequence);
             StopCo(ref refreshCoroutine);
             StopCo(ref _refreshHistoryLightCo);
             _boundCategoryNavSessionForCurrentRefresh = _categoryTypeNavStopwatch != null ? _categoryTypeNavTargetSession : 0;
             _refreshFilesDebugSource = refreshDebugSource;
-            ShowLoadingOverlay(null);
+            if (!_quietGalleryRefresh)
+                ShowLoadingOverlay(null);
             refreshCoroutine = StartCoroutine(RefreshFilesRoutine(keepScroll, scrollToBottom));
         }
 
@@ -2240,6 +2239,8 @@ namespace VPB
             _packageDeltaSideTabsCoroutine = null;
             try { CacheCategoryCounts(); } catch { }
             try { CacheCreators(); } catch { }
+            // ApplyPackageDelta already cleared userTagsCached; fill amounts once cat_mem is current.
+            try { CacheUserTagsSideTab(); } catch { }
             if (!IsVisible && !hasLoadedContent) yield break;
             try { UpdateTabsImpl(rebuildSideTabLists: true, rebuildSubPaneSideTabLists: true); } catch { }
         }
@@ -2290,11 +2291,12 @@ namespace VPB
                     sb.Append("0").Append('\u001E');
                 }
                 sb.Append(currentRatingFilter ?? "").Append('\u001E');
+                sb.Append(currentLicenseFilter ?? "").Append('\u001E');
                 sb.Append(currentSizeFilter ?? "").Append('\u001E');
                 sb.Append(categoryFilter ?? "").Append('\u001E');
                 sb.Append(creatorFilter ?? "").Append('\u001E');
                 sb.Append(tagFilter ?? "").Append('\u001E');
-                sb.Append(isRatingSortToggleEnabled ? '1' : '0').Append('\u001E');
+                sb.Append((char)('0' + (int)_ratingPresenceFilterMode)).Append('\u001E');
                 sb.Append((VPBConfig.Instance != null && VPBConfig.Instance.GalleryShowHiddenPackages) ? '1' : '0').Append('\u001E');
                 sb.Append(((int)_browseHiddenCycle).ToString()).Append('\u001E');
                 sb.Append(((int)_browseAlwaysLoadedCycle).ToString()).Append('\u001E');
@@ -2363,8 +2365,9 @@ namespace VPB
         /// </summary>
         private bool RefreshFilesRoutineCanFastAppendSqliteBulkList(bool wantsPoseCountsLocal)
         {
-            if (isRatingSortToggleEnabled) return false;
+            if (HasRatingPresenceFilter()) return false;
             if (!string.IsNullOrEmpty(currentRatingFilter)) return false;
+            if (HasLicenseFilter()) return false;
             if (!string.IsNullOrEmpty(currentSizeFilter)) return false;
             // bulk (cat_mem, VAR-only) is fast-appended without per-entry PassesFilters, where the source gate lives;
             // a bulk AddRange under Source:Local would leak every var row, so force the gated drain when it's active.
@@ -2430,11 +2433,6 @@ namespace VPB
                 }
                 if (posePeopleFilter == PosePeopleFilter.Single && pcPose >= 2) return false;
                 if (posePeopleFilter == PosePeopleFilter.Dual && pcPose < 2) return false;
-            }
-
-            if (isRatingSortToggleEnabled)
-            {
-                if (RatingsManager.Instance.GetRating(entry) <= 0) return false;
             }
 
             targetFiles.Add(entry);
@@ -2719,7 +2717,7 @@ namespace VPB
                     }
                 };
 
-                if (layoutMode == GalleryLayoutMode.List)
+                if (layoutMode == GalleryLayoutMode.List || settingsListViewActive || IsSettingsPanelOpen())
                 {
                     recyclingGrid.fixedColumns = 1;
                     recyclingGrid.SetGridConfig(100f, EffectiveListRowHeightForGallery(), 5f, 5f, 1, deferRefresh: true);
@@ -2911,13 +2909,15 @@ namespace VPB
                 : _pendingScrollRestore;
 
             // Configure grid immediately so it has correct dimensions even while loading
-            if (contentGO != null)
+            // Quiet mode: keep frozen display cells — SetItemCount(0) would blank the viewport.
+            if (!_quietGalleryRefresh && contentGO != null)
             {
                 if (recyclingGrid == null) recyclingGrid = contentGO.GetComponent<RecyclingGridView>();
                 if (recyclingGrid != null)
                 {
-                    if (layoutMode == GalleryLayoutMode.List)
+                    if (layoutMode == GalleryLayoutMode.List || settingsListViewActive || IsSettingsPanelOpen())
                     {
+                        recyclingGrid.fixedColumns = 1;
                         recyclingGrid.SetGridConfig(100f, EffectiveListRowHeightForGallery(), 5f, 5f, 1, deferRefresh: true);
                         recyclingGrid.SetAdaptiveConfig(true, 0f, 1, true, deferRefresh: true);
                     }
@@ -3091,7 +3091,9 @@ namespace VPB
                         {
                             var counts = new Dictionary<string, int>();
                             // Package-only category: count packages by creator (not internal file entries)
-                            if (string.Equals(_bExtension, "varpkg", StringComparison.OrdinalIgnoreCase))
+                            bool packageOnlyCreators = string.Equals(_bExtension, "varpkg", StringComparison.OrdinalIgnoreCase)
+                                || VpbLocalDatabase.IsGalleryAllVarPseudoCategory(_bCategoryTitle);
+                            if (packageOnlyCreators)
                             {
                                 if (!VpbLocalDatabase.TryReadVarPackageCreatorCounts(counts, _bPackagePathFilter) && FileManager.PackagesByUid != null)
                                 {
@@ -3112,7 +3114,15 @@ namespace VPB
                             {
                                 string[] exts2 = string.IsNullOrEmpty(_bExtension) ? new string[0] : _bExtension.Split('|');
                                 var tExts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                                foreach (var e in exts2) if (!string.IsNullOrEmpty(e)) tExts.Add(e.Trim());
+                                foreach (var e in exts2)
+                                {
+                                    if (string.IsNullOrEmpty(e)) continue;
+                                    string et = e.Trim();
+                                    if (et.Length == 0 || Gallery.IsGalleryPseudoExtensionToken(et)) continue;
+                                    tExts.Add(et);
+                                }
+                                bool everythingExtForCreators = Gallery.IsEverythingCategoryExtension(_bExtension)
+                                    || Gallery.IsEverythingCategoryName(_bCategoryTitle);
 
                                 if (FileManager.PackagesByUid != null)
                                 {
@@ -3129,13 +3139,19 @@ namespace VPB
                                             string ip = pkg.FileEntries[i].InternalPath;
                                             int dot = ip.LastIndexOf('.');
                                             if (dot < 0 || dot == ip.Length - 1) continue;
-                                            if (!tExts.Contains(ip.Substring(dot + 1))) continue;
-                                            bool match = false;
-                                            if (_bPaths != null && _bPaths.Count > 0)
-                                            { for (int k = 0; k < _bPaths.Count; k++) if (GalleryInternalPathStartsWithPrefix(ip, _bPaths[k])) { match = true; break; } }
-                                            else if (!string.IsNullOrEmpty(_bPath))
-                                                match = GalleryInternalPathStartsWithPrefix(ip, _bPath);
-                                            else match = true;
+                                            string fileExt = ip.Substring(dot + 1);
+                                            if (everythingExtForCreators && Gallery.IsEverythingExcludedPreviewExtension(fileExt)) continue;
+                                            if (!everythingExtForCreators && !tExts.Contains(fileExt)) continue;
+                                            // EVERYTHING: match all non-preview internals (category.paths are loose-disk roots only).
+                                            bool match = everythingExtForCreators;
+                                            if (!match)
+                                            {
+                                                if (_bPaths != null && _bPaths.Count > 0)
+                                                { for (int k = 0; k < _bPaths.Count; k++) if (GalleryInternalPathStartsWithPrefix(ip, _bPaths[k])) { match = true; break; } }
+                                                else if (!string.IsNullOrEmpty(_bPath))
+                                                    match = GalleryInternalPathStartsWithPrefix(ip, _bPath);
+                                                else match = true;
+                                            }
                                             if (match) { int cur; counts.TryGetValue(pkg.Creator, out cur); counts[pkg.Creator] = cur + 1; }
                                         }
                                     }
@@ -3408,7 +3424,15 @@ namespace VPB
                                             continue;
                                     }
 
-                                    if (!appearanceWorkerSkipPathMatch
+                                    // Appearance: always require look paths — even when skipPathMatch (non-Local).
+                                    // Else json|vap package fallback floods SubScene/Scene into Appearance grid.
+                                    if (titleForIndexMain.IndexOf("Appearance", StringComparison.OrdinalIgnoreCase) >= 0)
+                                    {
+                                        if (IsForbiddenInAppearanceCategory(internalPath)
+                                            || !IsAppearanceLookInternalPath(internalPath))
+                                            continue;
+                                    }
+                                    else if (!appearanceWorkerSkipPathMatch
                                         && !RefreshWorkerPathMatches(internalPath, workerPathsSnap, workerPathSnap))
                                         continue;
 
@@ -3692,7 +3716,14 @@ namespace VPB
                                     }
                                     if (!extMatch) continue;
 
-                                    if (!appearanceWorkerSkipPathMatch
+                                    // Appearance package scan: never accept SubScene/Scene/other Person presets.
+                                    if (titleForIndexMain.IndexOf("Appearance", StringComparison.OrdinalIgnoreCase) >= 0)
+                                    {
+                                        if (IsForbiddenInAppearanceCategory(checkPath)
+                                            || !IsAppearanceLookInternalPath(checkPath))
+                                            continue;
+                                    }
+                                    else if (!appearanceWorkerSkipPathMatch
                                         && !RefreshWorkerPathMatches(checkPath, workerPathsSnap, workerPathSnap))
                                         continue;
 
@@ -3829,7 +3860,7 @@ namespace VPB
                                 {
                                     LogUtil.Log("[VPB.Gallery.DeepTiming] RefreshFilesRoutine bulk slow-path"
                                         + " | bulk=" + bulk.Count
-                                        + " | ratingToggle=" + (isRatingSortToggleEnabled ? "1" : "0")
+                                        + " | ratingToggle=" + ((int)_ratingPresenceFilterMode)
                                         + " | ratingFilter=" + (string.IsNullOrEmpty(currentRatingFilter) ? "0" : "1")
                                         + " | sizeFilter=" + (string.IsNullOrEmpty(currentSizeFilter) ? "0" : "1")
                                         + " | sceneSrcFilter=0"
@@ -3994,9 +4025,9 @@ namespace VPB
                             var sysEntryFast = new SystemFileEntry(FileManager.NormalizePath(r.Path), wt, sz, exists: true);
                             if (!PassesFilters(sysEntryFast, true)) continue;
 
-                            // Cache now stores the unfiltered candidate set, so pose/rating filters (which live
-                            // outside PassesFilters) must be re-applied here exactly as the live scan does — otherwise
-                            // they would not filter on a cache hit (#64).
+                            // Cache stores unfiltered candidates; pose people filter lives outside
+                            // PassesFilters and must be re-applied on cache hit (#64). Star presence /
+                            // star-count filters are inside PassesFilters above.
                             if (posePeopleFilter != PosePeopleFilter.All)
                             {
                                 int pcPoseRead = 1;
@@ -4010,10 +4041,6 @@ namespace VPB
                                 }
                                 if (posePeopleFilter == PosePeopleFilter.Single && pcPoseRead >= 2) continue;
                                 if (posePeopleFilter == PosePeopleFilter.Dual && pcPoseRead < 2) continue;
-                            }
-                            if (isRatingSortToggleEnabled)
-                            {
-                                if (RatingsManager.Instance.GetRating(sysEntryFast) <= 0) continue;
                             }
 
                             files.Add(sysEntryFast);
@@ -4132,11 +4159,6 @@ namespace VPB
                                     if (posePeopleFilter == PosePeopleFilter.Dual && pcPose < 2) continue;
                                 }
 
-                                if (isRatingSortToggleEnabled)
-                                {
-                                    if (RatingsManager.Instance.GetRating(sysEntry) <= 0) continue;
-                                }
-
                                 if (gridOk)
                                 {
                                     files.Add(sysEntry);
@@ -4230,8 +4252,8 @@ namespace VPB
 
             if (swDeep != null) deepGbListCopyMs = swDeep.ElapsedMilliseconds;
 
-            // Setup Recycling Grid
-            if (contentGO != null)
+            // Setup Recycling Grid (skipped in quiet mode — keep frozen display cells bound to _quietDisplayFiles)
+            if (!_quietGalleryRefresh && contentGO != null)
             {
                 // RecyclingGridView is already initialized in Init.cs, but ensure we have it
                 if (recyclingGrid == null) recyclingGrid = contentGO.GetComponent<RecyclingGridView>();
@@ -4271,7 +4293,7 @@ namespace VPB
                 int cols = GridColumnCount;
                 
                 // Initialize spacing and adaptive config
-                if (layoutMode == GalleryLayoutMode.List)
+                if (layoutMode == GalleryLayoutMode.List || settingsListViewActive || IsSettingsPanelOpen())
                 {
                     // List/Table mode: ALWAYS 1 column; +/- controls row height/thumb size.
                     recyclingGrid.fixedColumns = 1;
@@ -4302,7 +4324,10 @@ namespace VPB
                 if (swDeep != null) deepGbSetItemMs = swDeep.ElapsedMilliseconds;
             }
             if (swDeep != null) deepAfterGridBindMs = swDeep.ElapsedMilliseconds;
-            try { UpdateEmptyGridState(); } catch { }
+            if (!_quietGalleryRefresh)
+            {
+                try { UpdateEmptyGridState(); } catch { }
+            }
 
             // Legacy nav/file buttons (non-recycling): destroy in slices so main thread yields between batches (VaM stays responsive).
             int legacyBtnCount = activeButtons.Count;
@@ -4379,11 +4404,12 @@ namespace VPB
             }
             // Worker thread builds creator/category counts during refresh — skip redundant main-thread VAR scans here (still allow user-tag cache).
             bool suppressSyncCreatorCategoryCaches = earlyMetaNeeded && !skipEarlyMetaThread;
-            UpdateLayout(!suppressSyncCreatorCategoryCaches, true);
+            if (!_quietGalleryRefresh)
+                UpdateLayout(!suppressSyncCreatorCategoryCaches, true);
             if (swDeep != null) deepUpdateLayoutMs = swDeep.ElapsedMilliseconds;
             LogGalleryCategoryTypeNavPhase("RefreshFilesRoutine_after_UpdateLayout");
             // Layout rebuild can clamp ScrollRect and undo the position we just set.
-            if (scrollRect != null && !scrollToBottom)
+            if (!_quietGalleryRefresh && scrollRect != null && !scrollToBottom)
             {
                 if (savedCenterItemIndex >= 0 && recyclingGrid != null)
                     recyclingGrid.ScrollToCenterItem(savedCenterItemIndex);
@@ -4402,6 +4428,8 @@ namespace VPB
             {
                 categoriesCached = false;
                 creatorsCached = false;
+                // User-tag amounts need same post-index rebuild as category/creator (issue #84).
+                userTagsCached = false;
                 InvalidateSharedSideMetaIfPackageScanAdvanced();
                 _sideTabsNeedFullRebuildAfterFirstRefresh = false;
             }
@@ -4428,16 +4456,20 @@ namespace VPB
 
             // Show() used UpdateTabsImpl(false) while this coroutine ran, so category/creator/tag side lists stay stale until here.
             // Defer one frame (same as first-load / Pose) so we do not block overlay hide; covers every category switch.
-            if (leftTabContainerGO != null || rightTabContainerGO != null)
-                _deferredGallerySideTabsCoroutine = StartCoroutine(DeferredGallerySideTabsAfterGridReady(navSessionForThisRun, _deferredSubPaneSessionId, tagParallelWaiterForThisRun, tagScanRefreshSeq));
+            // Quiet background randomize: skip — side tabs + hide follow-up would thrash the frozen grid.
+            if (!_quietGalleryRefresh)
+            {
+                if (leftTabContainerGO != null || rightTabContainerGO != null)
+                    _deferredGallerySideTabsCoroutine = StartCoroutine(DeferredGallerySideTabsAfterGridReady(navSessionForThisRun, _deferredSubPaneSessionId, tagParallelWaiterForThisRun, tagScanRefreshSeq));
 
-            // Defer hide filtering until after the grid is visible (prescan .hide markers then filter in a coroutine).
-            // Always run follow-up: hide strip (unless sort needs hidden rows), then Hidden-only / AutoInstall-only narrowing, then re-sort.
-            StartCoroutine(PostFilesListHideAndSortFollowupRoutine(currentLoadingGroupId, keepScroll, scrollToBottom, savedScrollNormalizedPos));
+                // Defer hide filtering until after the grid is visible (prescan .hide markers then filter in a coroutine).
+                // Always run follow-up: hide strip (unless sort needs hidden rows), then Hidden-only / AutoInstall-only narrowing, then re-sort.
+                StartCoroutine(PostFilesListHideAndSortFollowupRoutine(currentLoadingGroupId, keepScroll, scrollToBottom, savedScrollNormalizedPos));
+            }
             // (FileManager scan still in progress), schedule a single retry — but only
             // if no retry is already pending/running. This prevents an infinite refresh
             // loop where each retry finds uncached packages and spawns yet another retry.
-            if (skippedForNoCache[0] > 0 && !Gallery.IsSuppressed() && !_cacheRetryPending)
+            if (!_quietGalleryRefresh && skippedForNoCache[0] > 0 && !Gallery.IsSuppressed() && !_cacheRetryPending)
             {
                 if (LogGalleryRefreshDeepTiming)
                 {
