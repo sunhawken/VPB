@@ -2353,6 +2353,8 @@ namespace VPB
 			{
 				try { VpbProgressService.EndDeepScan(); } catch { }
 				System.Threading.Interlocked.Exchange(ref s_BulkDeepScanActive, 0);
+				// RebuildCore may have coalesced while bulk scan held caches incomplete.
+				try { VpbLocalDatabase.FlushPendingGalleryIndexAfterDeepScan(); } catch { }
 			}
 		}
 
@@ -2998,6 +3000,9 @@ namespace VPB
 
         public static bool IsPackagePath(string path)
         {
+            if (string.IsNullOrEmpty(path)) return false;
+            // Windows drive abs paths contain ":/" (C:/...) — not VaM pkg:/internal.
+            if (LocalSceneGallerySupport.IsWindowsDriveAbsolutePath(path)) return false;
             string input = path.Replace('\\', '/');
             string packageUidOrPath = Regex.Replace(input, ":/.*", string.Empty);
             // IMPORTANT: do not use GetPackage default (ensureInstalled: true) here.
@@ -3425,6 +3430,12 @@ namespace VPB
 			return new List<VarPackage>();
 		}
 
+		/// <summary>Registered package count without allocating <see cref="GetPackages"/> list (UI tips / diag).</summary>
+		public static int GetPackageCount()
+		{
+			return packagesByUid != null ? packagesByUid.Count : 0;
+		}
+
 		public static List<string> GetPackageUids()
 		{
 			List<string> list;
@@ -3672,6 +3683,10 @@ namespace VPB
 		{
 			try
 			{
+				// Always yield once so VPB Init / Update are not blocked by native Refresh
+				// (Unity 2018 main thread — sync Refresh was a multi-minute hang under scan whitelist + #12).
+				yield return null;
+
 				bool startupNotReady = !LogUtil.IsStartupReadyLogged() && !LogUtil.IsReadyLogged();
 				if (startupNotReady)
 					VamStartupProfiler.Milestone("mvr_native_refresh_delay_skipped (startup)");
@@ -3679,8 +3694,7 @@ namespace VPB
 					yield return new WaitForSeconds(0.5f);
 				var sw = Stopwatch.StartNew();
 				VamStartupProfiler.Milestone("mvr_native_FileManager.Refresh_invoke_begin");
-				VamOnDemandLoader.PausePhysicsForCatalogRefresh();
-				MVR.FileManagement.FileManager.Refresh();
+				VamOnDemandLoader.InvokeNativeFileManagerRefreshForDelayedMvr("mvr_delayed_native_refresh");
 				sw.Stop();
 				VamStartupProfiler.AddPhaseMs("mvr_delayed_native_refresh", sw.Elapsed.TotalMilliseconds);
 				VamStartupProfiler.Milestone("mvr_delayed_native_refresh_done ms=" + sw.ElapsedMilliseconds);

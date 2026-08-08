@@ -30,6 +30,9 @@ namespace VPB
             return v;
         }
 
+        /// <summary>Public clamp for gallery UI scale helpers (auto-detect, settings).</summary>
+        public static float ClampUiScalePublic(float v) => ClampUiScale(v);
+
         public static float ClampGalleryElementCornerRadiusFraction(float v)
         {
             if (float.IsNaN(v) || float.IsInfinity(v)) v = GalleryUiDesignTokens.ButtonCornerRadiusFraction;
@@ -131,16 +134,8 @@ namespace VPB
         public bool EnableGalleryElementRounding = true;
         /// <summary>Corner radius as a fraction (0.05..0.5) of each element's shorter side. Used when <see cref="EnableGalleryElementRounding"/> is true.</summary>
         public float GalleryElementCornerRadiusFraction = GalleryUiDesignTokens.ButtonCornerRadiusFraction;
-        /// <summary>When true, first-run hint strip under title bar is hidden permanently.</summary>
-        public bool FirstRunHintsDismissed = false;
         /// <summary>When true (default), VR hover dwell shows a local tooltip label on controls.</summary>
         public bool VrHoverTooltipEnabled = true;
-        /// <summary>Mode setup wizard completed for desktop fixed dock.</summary>
-        public bool ModeSetupWizardDoneDesktopFixed = false;
-        /// <summary>Mode setup wizard completed for desktop floating gallery.</summary>
-        public bool ModeSetupWizardDoneDesktopFloating = false;
-        /// <summary>Mode setup wizard completed for VR gallery sessions.</summary>
-        public bool ModeSetupWizardDoneVR = false;
         public string ShowSideButtons = "Both"; // "Both", "Left", "Right"
         public string _followAngle = "Both"; // "Off", "Desktop", "VR", "Both"
         public string FollowAngle
@@ -200,7 +195,7 @@ namespace VPB
         }
         /// <summary>True keeps target atom's current scale when an Appearance preset is applied (both toolbox and drag-drop). Default false.</summary>
         public bool SuppressAppearanceScaleChange { get; set; } = false;
-        /// <summary>Persisted import-sidebar toggle state (suppress-clothing, only-suppress-real, sub-toggles, last type). See GalleryPanel.ImportSidebar.cs Load/SaveImportSidebarPrefs.</summary>
+        /// <summary>Persisted import-sidebar state (open, onLeft, suppress-clothing, only-suppress-real, sub-toggles, last type). See GalleryPanel.ImportSidebar.cs Load/SaveImportSidebarPrefs.</summary>
         public JSONClass ImportSidebarPrefs = new JSONClass();
         /// <summary>When true, suppresses CheesyFX NullReferenceException spam in Unity/BepInEx logs (broken Update loops).</summary>
         public bool SuppressCheesyFxNullReferenceLogs = true;
@@ -216,14 +211,14 @@ namespace VPB
         public bool GalleryAutoGenderFilter = true;
         /// <summary>When true (default), visible gallery panes collapse (fixed dock) or hide (floating) when a scene is launched.</summary>
         public bool GalleryCollapseOnSceneLaunch = true;
-        /// <summary>Effective drag-and-drop state at runtime; off while <see cref="HoldToLaunchEnabled"/> (same pointer hold as drag start).</summary>
+        /// <summary>Effective drag-and-drop at runtime; off while <see cref="HoldToLaunchEnabled"/> (hold-to-launch owns the same press).</summary>
         public bool EffectiveEnableDragDrop
         {
             get { return EnableDragDrop && !HoldToLaunchEnabled; }
         }
-        /// <summary>Legacy persisted flag; ignored for behavior when <see cref="EnableDragDrop"/> is on — hold is always required then. Serialized for forward compatibility.</summary>
+        /// <summary>Legacy persisted flag. Desktop DnD uses movement threshold only; VR still uses <see cref="DragHoldThreshold"/>. Serialized for forward compatibility.</summary>
         public bool RequireDragHoldBeforeMove = false;
-        /// <summary>Minimum seconds before gallery item drag can start when drag-and-drop is on; loaded/saved values are clamped to this floor.</summary>
+        /// <summary>VR only: minimum seconds held before gallery item drag can start. Desktop ignores this (click-drag after pixel slack).</summary>
         public const float DragHoldThresholdMin = 0.4f;
         public float DragHoldThreshold = 0.5f;
 
@@ -231,7 +226,7 @@ namespace VPB
         public static float ClampDragHoldThreshold(float seconds) =>
             Mathf.Clamp(seconds, DragHoldThresholdMin, 1f);
 
-        /// <summary>Ensures hold-before-drag when drag-and-drop is enabled and threshold meets minimum.</summary>
+        /// <summary>Clamp hold threshold; keep legacy RequireDragHoldBeforeMove in sync when DnD enabled.</summary>
         public void NormalizeDragDropHoldSettings()
         {
             DragHoldThreshold = ClampDragHoldThreshold(DragHoldThreshold);
@@ -239,6 +234,10 @@ namespace VPB
                 RequireDragHoldBeforeMove = true;
         }
         public string ApplyMode = "DoubleClick";
+        /// <summary>Last scene-drop context action id (ContextMenuPanel.SceneActionId). Sticky primary / Alt-skip.</summary>
+        public string LastContextSceneAction = "";
+        /// <summary>Last appearance-drop context action id (ContextMenuPanel.AppearanceActionId). Sticky primary / Alt-skip.</summary>
+        public string LastContextAppearanceAction = "";
         public string LastGalleryCategory = "";
         /// <summary>Gallery footer performance tuning (hair + mirrors) enabled.</summary>
         public bool PerfModeEnabled = false;
@@ -330,7 +329,7 @@ namespace VPB
             if (string.Equals(mode, "None", StringComparison.OrdinalIgnoreCase)) return false;
             return true;
         }
-        /// <summary>Category when opening a new gallery pane or at session first open: "Scenes" (default), "Clothing", "Hair", "Pose", "Appearance", "Plugins", or "LastUsed".</summary>
+        /// <summary>Category on cold VaM launch only: "Scenes" (default), "Clothing", "Hair", "Pose", "Appearance", "Plugins", or "LastUsed". In-session Close/reopen uses <see cref="LastGalleryCategory"/>.</summary>
         public string InitialGalleryCategory = "Scenes";
         /// <summary>Global source filter for gallery: All (default), Local (loose files only), or Var (.var packages only).</summary>
         public GlobalSourceFilterValue GlobalSourceFilter = GlobalSourceFilterValue.All;
@@ -355,6 +354,8 @@ namespace VPB
         public string GalleryHoverPreviewMode = "List";
         /// <summary>Square preview size (pixels) for hover preview.</summary>
         public float GalleryListHoverPreviewSize = 300f;
+        public const float GalleryHoverPreviewSizeMin = 200f;
+        public const float GalleryHoverPreviewSizeMax = 1200f;
         /// <summary>X offset (unscaled px) from canvas bottom-left default (20). Independent of gallery dock/pane size.</summary>
         public float GalleryListHoverPreviewOffsetX = 0f;
         /// <summary>Y offset (unscaled px) from canvas bottom-left default (12). Independent of gallery dock/pane size. Drag placeholder in Settings to set.</summary>
@@ -477,7 +478,54 @@ namespace VPB
             try { TriggerChange(); } catch { }
         }
 
-        /// <summary>When true, the gallery selection toolbar (tbox) pin stays on across sessions until turned off manually.</summary>
+        /// <summary>
+        /// Creator Mode Strip Scene keep bitmask (<see cref="CreatorStripKeepKind"/>).
+        /// 0 = use default (Persons | Lights). Persisted across sessions.
+        /// </summary>
+        public int CreatorStripKeepMask = (int)SceneUtils.CreatorStripKeepDefault;
+
+        /// <summary>
+        /// Named Strip Scene recipes JSON array:
+        /// [{name,mask,expand,renames:{uid:newName}}]. Max 8. Empty = none.
+        /// </summary>
+        public string CreatorStripRecipesJson = "[]";
+
+        /// <summary>
+        /// Last successful Strip keep set JSON:
+        /// {mask,expand,uids:[...],renames:{uid:newName}}. Empty = none.
+        /// </summary>
+        public string CreatorStripLastRecipeJson = "";
+
+        /// <summary>Strip keep floating panel position (canvas-local), when saved.</summary>
+        public bool CreatorStripPanelPosSaved = false;
+        public float CreatorStripPanelPosX = 0f;
+        public float CreatorStripPanelPosY = 0f;
+        /// <summary>Strip keep floating panel size at scale 1, when saved.</summary>
+        public bool CreatorStripPanelSizeSaved = false;
+        public float CreatorStripPanelWidthRef = 560f;
+        public float CreatorStripPanelHeightRef = 640f;
+
+        /// <summary>
+        /// Strip Scene possessable policy (Session Plugins parity).
+        /// Defaults match common VR strip: clear all, add head/hands for male.
+        /// </summary>
+        public bool CreatorStripRemovePossessable = true;
+        public bool CreatorStripAddPossessableMale = true;
+        public bool CreatorStripAddPossessableFemale = false;
+        /// <summary>0=Off, 1=Actor#, 2=Prefix M_/F_, 3=Rename Male/Female. See StripKeepPersonRenameMode.</summary>
+        public int CreatorStripPersonRenameMode = 0;
+
+        /// <summary>
+        /// Strip create-fill when lights removed: default SubScene JSON path (empty = none).
+        /// </summary>
+        public string CreatorStripDefaultSubScenePath = "";
+
+        /// <summary>
+        /// Last create-fill choice when lights stripped: 0=None, 1=Default 3P, 2=Import SubScene.
+        /// </summary>
+        public int CreatorStripCreateFillMode = 1;
+
+        /// <summary>Legacy (unused): old pin-toolbox pref. Kept for VPB.cfg read/write compat only.</summary>
         public bool GalleryTboxToolbarPinned = false;
         /// <summary>When true (default), selection detail strip is shown above the toolbox; when false, collapses to Details button in toolbox.</summary>
         public bool GalleryDetailStripExpanded = true;
@@ -501,6 +549,34 @@ namespace VPB
         public bool GalleryDetailStripTagMenuSizeSaved = false;
         public float GalleryDetailStripTagMenuWidthRef = 0f;
         public float GalleryDetailStripTagMenuHeightRef = 0f;
+        /// <summary>Filter presets list opens as floating window (title-bar button still toggles).</summary>
+        public bool GalleryQuickFiltersDetached = false;
+        /// <summary>When true, restore last filter-presets floating position (canvas-local, center).</summary>
+        public bool GalleryQuickFiltersPosSaved = false;
+        public float GalleryQuickFiltersPosX = 0f;
+        public float GalleryQuickFiltersPosY = 0f;
+        /// <summary>When true, restore last filter-presets floating size (design px at scale 1).</summary>
+        public bool GalleryQuickFiltersSizeSaved = false;
+        public float GalleryQuickFiltersWidthRef = 280f;
+        public float GalleryQuickFiltersHeightRef = 420f;
+        /// <summary>Scene Import sidebar opens as floating window (side-rail still toggles open/close).</summary>
+        public bool GalleryImportSidebarDetached = false;
+        /// <summary>When true, restore last Scene Import floating position (canvas-local, center).</summary>
+        public bool GalleryImportSidebarPosSaved = false;
+        public float GalleryImportSidebarPosX = 0f;
+        public float GalleryImportSidebarPosY = 0f;
+        /// <summary>When true, restore last Scene Import floating size (design px at scale 1).</summary>
+        public bool GalleryImportSidebarSizeSaved = false;
+        public float GalleryImportSidebarWidthRef = 360f;
+        public float GalleryImportSidebarHeightRef = 560f;
+        /// <summary>When true, restore last Remap Atom UIDs floating position (canvas-local, center).</summary>
+        public bool GalleryRemapAtomUidsPosSaved = false;
+        public float GalleryRemapAtomUidsPosX = 0f;
+        public float GalleryRemapAtomUidsPosY = 0f;
+        /// <summary>When true, restore last Remap Atom UIDs floating size (design px at scale 1).</summary>
+        public bool GalleryRemapAtomUidsSizeSaved = false;
+        public float GalleryRemapAtomUidsWidthRef = 680f;
+        public float GalleryRemapAtomUidsHeightRef = 460f;
         /// <summary>When true, gallery pane only shows while the VaM menu (main HUD) is visible.</summary>
         public bool GalleryOnlyWhenVamMenuVisible = false;
         /// <summary>When true, gallery pane is anchored to the VAM menu system in VR mode.</summary>
@@ -590,7 +666,7 @@ namespace VPB
             return "Scenes";
         }
 
-        /// <summary>Resolved tab for a new pane or first gallery open this session: a category name, or null when <see cref="InitialGalleryCategory"/> is LastUsed (restore saved tab).</summary>
+        /// <summary>Resolved tab for a new pane or the first gallery open this VaM process: a category name, or null when <see cref="InitialGalleryCategory"/> is LastUsed (restore saved tab). Reopen after Close uses LastGalleryCategory via <see cref="Gallery.SessionInitialCategoryApplied"/>.</summary>
         public string ResolveInitialGalleryCategoryName()
         {
             string n = NormalizeInitialGalleryCategory(InitialGalleryCategory);
@@ -603,6 +679,12 @@ namespace VPB
         public string GalleryDefaultLeftSidePanel = "None";
         /// <summary>Which list opens on the right when a gallery pane is created (see <see cref="GallerySidePanelOptions"/>).</summary>
         public string GalleryDefaultRightSidePanel = "None";
+        /// <summary>Last left side-rail / Import from Hide/Close (see <see cref="GallerySidePanelOptions"/>). Used after first open instead of defaults.</summary>
+        public string LastGalleryLeftSidePanel = "None";
+        /// <summary>Last right side-rail / Import from Hide/Close.</summary>
+        public string LastGalleryRightSidePanel = "None";
+        /// <summary>True after browse memory has written side-rail place at least once this install.</summary>
+        public bool LastGallerySideRailsSaved = false;
         /// <summary>Default User Tags side panel mode when opening tags: FilterByTags (default), Tag, or FilterUntagged.</summary>
         public string GalleryDefaultUserTagAvailMode = "FilterByTags";
         /// <summary>When true (default), User Tags available list in Filter work mode hides zero-count tags behind an Unused bucket (side search still matches full vocab).</summary>
@@ -615,7 +697,7 @@ namespace VPB
         public bool GalleryScrollButtonsEnabled = true;
         /// <summary>When true, VR thumbstick forward/back scrolls the gallery while the pointer is over a pane (blocks free-move on that axis).</summary>
         public bool GalleryVrThumbstickScrollEnabled = true;
-        /// <summary>When true, gallery hides side-rail Creator buttons; creator filtering uses title-bar control only. Side creator panes stay closed.</summary>
+        /// <summary>When true, gallery does not create side-rail Creator buttons; creator filtering uses title-bar control only. Side creator panes stay closed.</summary>
         public bool GalleryHideCreatorSideButtons = false;
         /// <summary>When true (default), side-rail Category mode shows per-category left icons (c_*.png).</summary>
         public bool GalleryShowCategoryIcons = true;
@@ -744,11 +826,20 @@ namespace VPB
         public bool GalleryShowHiddenPackages = false;
         public float SideButtonScale = 1.0f;
         public float SideButtonScaleVR = 1.0f;
-        public float SideButtonScaleDesktop = 0.8f;
+        public float SideButtonScaleDesktop = 1.0f;
         private float _innerPaneScaleVR = 1.0f;
-        private float _innerPaneScaleDesktop = 0.8f;
+        private float _innerPaneScaleDesktop = 1.0f;
         /// <summary>One-time migration: merged separate inner/side scale sliders into unified gallery UI scale.</summary>
         public bool GalleryUiScaleUnifiedMigrated = false;
+        /// <summary>
+        /// True after first-run gallery UI scale auto-seed finished, or after grandfathering an existing VPB.cfg.
+        /// Prevents re-detect on later startups.
+        /// </summary>
+        public bool GalleryUiScaleAutoSeeded = false;
+        /// <summary>Seed formula revision last applied (see <see cref="GalleryUiScaleAutoDetect.SeedRevision"/>).</summary>
+        public int GalleryUiScaleAutoSeedRevision = 0;
+        /// <summary>True when Load() found an existing VPB.cfg (used to grandfather upgrades without re-seeding).</summary>
+        private bool _loadedFromExistingConfig;
         public float InnerPaneScaleVR
         {
             get { return ClampUiScale(_innerPaneScaleVR); }
@@ -803,14 +894,70 @@ namespace VPB
         {
             get
             {
-                try
-                {
-                    if (Settings.Instance != null && Settings.Instance.UIScale != null)
-                        return Settings.Instance.UIScale.Value;
-                }
-                catch { }
-                return GalleryUiDesignTokens.VamUiScaleDesignBaseline;
+                // Desktop HostScale follows VaM Monitor UI Scale (User Preferences → UI).
+                return GalleryUiScaleAutoDetect.ReadMonitorUiScale();
             }
+        }
+
+        /// <summary>
+        /// First-run / deferred seed of gallery pane scales. Safe to call repeatedly.
+        /// Existing configs without the flag are grandfathered (keep saved scales).
+        /// Revision bumps re-apply only when saved pane still matches the prior auto-seed formula.
+        /// </summary>
+        public bool TryEnsureGalleryUiScaleAutoSeeded()
+        {
+            if (GalleryUiScaleAutoSeeded
+                && GalleryUiScaleAutoSeedRevision >= GalleryUiScaleAutoDetect.SeedRevision)
+                return true;
+
+            int screenH = 0;
+            try { screenH = Screen.height; } catch { screenH = 0; }
+
+            // Brand-new install: wait until Screen.height is valid (may be 0 in early Awake).
+            if (!_loadedFromExistingConfig)
+            {
+                if (!GalleryUiScaleAutoDetect.TryApplyRecommendedPaneScales(this))
+                    return false;
+                GalleryUiScaleAutoSeeded = true;
+                GalleryUiScaleAutoSeedRevision = GalleryUiScaleAutoDetect.SeedRevision;
+                try { Save(false, true); } catch { }
+                return true;
+            }
+
+            // Existing cfg: grandfather once, or correct untouched rev-1 seeds after formula change.
+            bool changed = false;
+            if (!GalleryUiScaleAutoSeeded)
+            {
+                GalleryUiScaleAutoSeeded = true;
+                changed = true;
+            }
+
+            if (GalleryUiScaleAutoSeedRevision < GalleryUiScaleAutoDetect.SeedRevision)
+            {
+                bool retouch = false;
+                if (screenH > 0
+                    && GalleryUiScaleAutoSeedRevision >= 1
+                    && GalleryUiScaleAutoDetect.LooksLikeUntouchedRevision1Seed(InnerPaneScaleDesktop, screenH))
+                {
+                    retouch = GalleryUiScaleAutoDetect.TryApplyRecommendedPaneScales(this);
+                }
+                else if (GalleryUiScaleAutoSeedRevision == 0 && screenH > 0
+                    && GalleryUiScaleAutoDetect.LooksLikeUntouchedRevision1Seed(InnerPaneScaleDesktop, screenH))
+                {
+                    // Seeded under rev1 before revision field existed.
+                    retouch = GalleryUiScaleAutoDetect.TryApplyRecommendedPaneScales(this);
+                }
+
+                if (retouch) changed = true;
+                GalleryUiScaleAutoSeedRevision = GalleryUiScaleAutoDetect.SeedRevision;
+                changed = true;
+            }
+
+            if (changed)
+            {
+                try { Save(false, true); } catch { }
+            }
+            return true;
         }
 
         private void MigrateGalleryUiScaleUnified()
@@ -936,6 +1083,7 @@ namespace VPB
         {
             string cfgPath = ConfigPath;
             bool cfgExistedAtStart = File.Exists(cfgPath);
+            _loadedFromExistingConfig = false;
             Stopwatch loadSw = Stopwatch.StartNew();
             _lightweightGalleryTabRefreshSlotsRemaining = 0;
             VPBLogger.Config.LogInfo("Starting Load() from: " + cfgPath);
@@ -943,11 +1091,7 @@ namespace VPB
             EnableButtonGaps = true;
             EnableGalleryElementRounding = true;
             GalleryElementCornerRadiusFraction = GalleryUiDesignTokens.ButtonCornerRadiusFraction;
-            FirstRunHintsDismissed = false;
             VrHoverTooltipEnabled = true;
-            ModeSetupWizardDoneDesktopFixed = false;
-            ModeSetupWizardDoneDesktopFloating = false;
-            ModeSetupWizardDoneVR = false;
             ShowSideButtons = "Both";
             _followAngle = "Both";
             _followDistance = "VR";
@@ -977,6 +1121,8 @@ namespace VPB
             RequireDragHoldBeforeMove = false;
             DragHoldThreshold = 0.5f;
             ApplyMode = "DoubleClick";
+            LastContextSceneAction = "";
+            LastContextAppearanceAction = "";
             LastGalleryCategory = "";
             PerfModeEnabled = false;
             PerfStepIndex = 0;
@@ -1015,6 +1161,9 @@ namespace VPB
             GallerySearchScope = "PathAndName";
             GalleryDefaultLeftSidePanel = "None";
             GalleryDefaultRightSidePanel = "None";
+            LastGalleryLeftSidePanel = "None";
+            LastGalleryRightSidePanel = "None";
+            LastGallerySideRailsSaved = false;
             GalleryDefaultUserTagAvailMode = "FilterByTags";
             GalleryHideUnusedUserTagsInFilterMode = true;
             GalleryUserTagFilterCombineMode = "Compound";
@@ -1061,6 +1210,21 @@ namespace VPB
             GalleryScanWlTempBorderColorG = 0.15f;
             GalleryScanWlTempBorderColorB = 1f;
             GalleryScanWlTempBorderColorA = 1f;
+            CreatorStripKeepMask = (int)SceneUtils.CreatorStripKeepDefault;
+            CreatorStripRecipesJson = "[]";
+            CreatorStripLastRecipeJson = "";
+            CreatorStripPanelPosSaved = false;
+            CreatorStripPanelPosX = 0f;
+            CreatorStripPanelPosY = 0f;
+            CreatorStripPanelSizeSaved = false;
+            CreatorStripPanelWidthRef = 560f;
+            CreatorStripPanelHeightRef = 640f;
+            CreatorStripRemovePossessable = true;
+            CreatorStripAddPossessableMale = true;
+            CreatorStripAddPossessableFemale = false;
+            CreatorStripPersonRenameMode = 0;
+            CreatorStripDefaultSubScenePath = "";
+            CreatorStripCreateFillMode = 1;
             GalleryTboxToolbarPinned = false;
             GalleryDetailStripExpanded = true;
             GalleryDetailStripSideInfoEnabled = true;
@@ -1072,6 +1236,26 @@ namespace VPB
             GalleryDetailStripTagMenuSizeSaved = false;
             GalleryDetailStripTagMenuWidthRef = 0f;
             GalleryDetailStripTagMenuHeightRef = 0f;
+            GalleryQuickFiltersDetached = false;
+            GalleryQuickFiltersPosSaved = false;
+            GalleryQuickFiltersPosX = 0f;
+            GalleryQuickFiltersPosY = 0f;
+            GalleryQuickFiltersSizeSaved = false;
+            GalleryQuickFiltersWidthRef = 280f;
+            GalleryQuickFiltersHeightRef = 420f;
+            GalleryImportSidebarDetached = false;
+            GalleryImportSidebarPosSaved = false;
+            GalleryImportSidebarPosX = 0f;
+            GalleryImportSidebarPosY = 0f;
+            GalleryImportSidebarSizeSaved = false;
+            GalleryImportSidebarWidthRef = 360f;
+            GalleryImportSidebarHeightRef = 560f;
+            GalleryRemapAtomUidsPosSaved = false;
+            GalleryRemapAtomUidsPosX = 0f;
+            GalleryRemapAtomUidsPosY = 0f;
+            GalleryRemapAtomUidsSizeSaved = false;
+            GalleryRemapAtomUidsWidthRef = 680f;
+            GalleryRemapAtomUidsHeightRef = 460f;
             UiLocale = "";
             SpringScrollButtonMode = "Desktop & VR";
             HoldToLaunchEnabled = false;
@@ -1092,11 +1276,20 @@ namespace VPB
             GalleryScrollButtonsEnabled = true;
             GalleryVrThumbstickScrollEnabled = true;
             GlobalSourceFilter = GlobalSourceFilterValue.All;
+            GalleryUiScaleAutoSeeded = false;
+            GalleryUiScaleAutoSeedRevision = 0;
+            GalleryUiScaleUnifiedMigrated = false;
+            SideButtonScale = 1.0f;
+            SideButtonScaleVR = 1.0f;
+            SideButtonScaleDesktop = 1.0f;
+            _innerPaneScaleVR = 1.0f;
+            _innerPaneScaleDesktop = 1.0f;
 
             try
             {
                 if (File.Exists(ConfigPath))
                 {
+                    _loadedFromExistingConfig = cfgExistedAtStart;
                     // Capture the value from the *previous* load (before defaults were reset above)
                     // so the log below can detect when the category actually changes between loads.
                     string prevLastGalleryCategory = s_LastLoggedLoadedGalleryCategory;
@@ -1108,20 +1301,7 @@ namespace VPB
                         if (node["EnableGalleryElementRounding"] != null) EnableGalleryElementRounding = node["EnableGalleryElementRounding"].AsBool;
                         if (node["GalleryElementCornerRadiusFraction"] != null)
                             GalleryElementCornerRadiusFraction = ClampGalleryElementCornerRadiusFraction(node["GalleryElementCornerRadiusFraction"].AsFloat);
-                        if (node["FirstRunHintsDismissed"] != null) FirstRunHintsDismissed = node["FirstRunHintsDismissed"].AsBool;
                         if (node["VrHoverTooltipEnabled"] != null) VrHoverTooltipEnabled = node["VrHoverTooltipEnabled"].AsBool;
-                        if (node["ModeSetupWizardDoneDesktopFixed"] != null) ModeSetupWizardDoneDesktopFixed = node["ModeSetupWizardDoneDesktopFixed"].AsBool;
-                        if (node["ModeSetupWizardDoneDesktopFloating"] != null) ModeSetupWizardDoneDesktopFloating = node["ModeSetupWizardDoneDesktopFloating"].AsBool;
-                        if (node["ModeSetupWizardDoneVR"] != null) ModeSetupWizardDoneVR = node["ModeSetupWizardDoneVR"].AsBool;
-                        if (cfgExistedAtStart
-                            && node["ModeSetupWizardDoneDesktopFixed"] == null
-                            && node["ModeSetupWizardDoneDesktopFloating"] == null
-                            && node["ModeSetupWizardDoneVR"] == null)
-                        {
-                            ModeSetupWizardDoneDesktopFixed = true;
-                            ModeSetupWizardDoneDesktopFloating = true;
-                            ModeSetupWizardDoneVR = true;
-                        }
                         if (node["ShowSideButtons"] != null) ShowSideButtons = node["ShowSideButtons"].Value;
                         
                         // Handle legacy bools if they exist, or just use string
@@ -1188,6 +1368,8 @@ namespace VPB
                         if (node["RequireDragHoldBeforeMove"] != null)
                             RequireDragHoldBeforeMove = node["RequireDragHoldBeforeMove"].AsBool;
                         if (node["ApplyMode"] != null) ApplyMode = node["ApplyMode"].Value;
+                        if (node["LastContextSceneAction"] != null) LastContextSceneAction = node["LastContextSceneAction"].Value ?? "";
+                        if (node["LastContextAppearanceAction"] != null) LastContextAppearanceAction = node["LastContextAppearanceAction"].Value ?? "";
                         if (node["LastGalleryCategory"] != null) LastGalleryCategory = node["LastGalleryCategory"].Value;
                         bool hadPerfModeKey = node["PerfModeEnabled"] != null;
                         bool hadPerfStepKey = node["PerfStepIndex"] != null;
@@ -1239,6 +1421,12 @@ namespace VPB
                             GalleryDefaultLeftSidePanel = NormalizeGallerySidePanel(node["GalleryDefaultLeftSidePanel"].Value);
                         if (node["GalleryDefaultRightSidePanel"] != null)
                             GalleryDefaultRightSidePanel = NormalizeGallerySidePanel(node["GalleryDefaultRightSidePanel"].Value);
+                        if (node["LastGalleryLeftSidePanel"] != null)
+                            LastGalleryLeftSidePanel = NormalizeGallerySidePanel(node["LastGalleryLeftSidePanel"].Value);
+                        if (node["LastGalleryRightSidePanel"] != null)
+                            LastGalleryRightSidePanel = NormalizeGallerySidePanel(node["LastGalleryRightSidePanel"].Value);
+                        if (node["LastGallerySideRailsSaved"] != null)
+                            LastGallerySideRailsSaved = node["LastGallerySideRailsSaved"].AsBool;
                         if (node["GalleryDefaultUserTagAvailMode"] != null)
                             GalleryDefaultUserTagAvailMode = NormalizeGalleryDefaultUserTagAvailMode(node["GalleryDefaultUserTagAvailMode"].Value);
                         if (node["GalleryHideUnusedUserTagsInFilterMode"] != null)
@@ -1283,7 +1471,7 @@ namespace VPB
                             GalleryHoverPreviewMode = NormalizeHoverPreviewMode(node["GalleryHoverPreviewMode"].Value);
                         else if (node["GalleryListHoverPreviewEnabled"] != null)
                             GalleryHoverPreviewMode = node["GalleryListHoverPreviewEnabled"].AsBool ? "List" : "Off";
-                        if (node["GalleryListHoverPreviewSize"] != null) GalleryListHoverPreviewSize = Mathf.Clamp(node["GalleryListHoverPreviewSize"].AsFloat, 200f, 600f);
+                        if (node["GalleryListHoverPreviewSize"] != null) GalleryListHoverPreviewSize = Mathf.Clamp(node["GalleryListHoverPreviewSize"].AsFloat, GalleryHoverPreviewSizeMin, GalleryHoverPreviewSizeMax);
                         if (node["GalleryListHoverPreviewOffsetX"] != null) GalleryListHoverPreviewOffsetX = Mathf.Clamp(node["GalleryListHoverPreviewOffsetX"].AsFloat, -4000f, 4000f);
                         if (node["GalleryListHoverPreviewOffsetY"] != null) GalleryListHoverPreviewOffsetY = Mathf.Clamp(node["GalleryListHoverPreviewOffsetY"].AsFloat, -4000f, 4000f);
                         if (node["GalleryGridLabelsEnabled"] != null) GalleryGridLabelsEnabled = node["GalleryGridLabelsEnabled"].AsBool;
@@ -1331,6 +1519,60 @@ namespace VPB
                             GalleryScanWlTempBorderEnabled = false;
                             GalleryScanWlBadgePrimaryV1 = true;
                         }
+                        if (node["CreatorStripKeepMask"] != null)
+                        {
+                            int rawMask = node["CreatorStripKeepMask"].AsInt;
+                            CreatorStripKeepMask = rawMask == 0
+                                ? (int)SceneUtils.CreatorStripKeepDefault
+                                : (rawMask & (int)SceneUtils.CreatorStripKeepAllUser);
+                        }
+                        if (node["CreatorStripRecipesJson"] != null)
+                        {
+                            string recipes = node["CreatorStripRecipesJson"].Value;
+                            CreatorStripRecipesJson = string.IsNullOrEmpty(recipes) ? "[]" : recipes;
+                        }
+                        if (node["CreatorStripLastRecipeJson"] != null)
+                        {
+                            string last = node["CreatorStripLastRecipeJson"].Value;
+                            CreatorStripLastRecipeJson = last ?? "";
+                        }
+                        if (node["CreatorStripPanelPosSaved"] != null)
+                            CreatorStripPanelPosSaved = node["CreatorStripPanelPosSaved"].AsBool;
+                        if (node["CreatorStripPanelPosX"] != null)
+                            CreatorStripPanelPosX = node["CreatorStripPanelPosX"].AsFloat;
+                        if (node["CreatorStripPanelPosY"] != null)
+                            CreatorStripPanelPosY = node["CreatorStripPanelPosY"].AsFloat;
+                        if (node["CreatorStripPanelSizeSaved"] != null)
+                            CreatorStripPanelSizeSaved = node["CreatorStripPanelSizeSaved"].AsBool;
+                        if (node["CreatorStripPanelWidthRef"] != null)
+                            CreatorStripPanelWidthRef = Mathf.Max(0f, node["CreatorStripPanelWidthRef"].AsFloat);
+                        if (node["CreatorStripPanelHeightRef"] != null)
+                            CreatorStripPanelHeightRef = Mathf.Max(0f, node["CreatorStripPanelHeightRef"].AsFloat);
+                        if (node["CreatorStripRemovePossessable"] != null)
+                            CreatorStripRemovePossessable = node["CreatorStripRemovePossessable"].AsBool;
+                        if (node["CreatorStripAddPossessableMale"] != null)
+                            CreatorStripAddPossessableMale = node["CreatorStripAddPossessableMale"].AsBool;
+                        if (node["CreatorStripAddPossessableFemale"] != null)
+                            CreatorStripAddPossessableFemale = node["CreatorStripAddPossessableFemale"].AsBool;
+                        if (node["CreatorStripPersonRenameMode"] != null)
+                        {
+                            int rm = node["CreatorStripPersonRenameMode"].AsInt;
+                            if (rm < 0) rm = 0;
+                            if (rm > 3) rm = 3;
+                            CreatorStripPersonRenameMode = rm;
+                        }
+                        if (node["CreatorStripDefaultSubScenePath"] != null)
+                        {
+                            string ssp = node["CreatorStripDefaultSubScenePath"].Value;
+                            CreatorStripDefaultSubScenePath = ssp != null ? ssp : "";
+                        }
+                        if (node["CreatorStripCreateFillMode"] != null)
+                        {
+                            int cfm = node["CreatorStripCreateFillMode"].AsInt;
+                            if (cfm < 0) cfm = 0;
+                            if (cfm > 2) cfm = 2;
+                            CreatorStripCreateFillMode = cfm;
+                        }
                         if (node["GalleryTboxToolbarPinned"] != null) GalleryTboxToolbarPinned = node["GalleryTboxToolbarPinned"].AsBool;
                         if (node["GalleryDetailStripExpanded"] != null) GalleryDetailStripExpanded = node["GalleryDetailStripExpanded"].AsBool;
                         if (node["GalleryDetailStripSideInfoEnabled"] != null) GalleryDetailStripSideInfoEnabled = node["GalleryDetailStripSideInfoEnabled"].AsBool;
@@ -1349,6 +1591,46 @@ namespace VPB
                             GalleryDetailStripTagMenuWidthRef = Mathf.Max(0f, node["GalleryDetailStripTagMenuWidthRef"].AsFloat);
                         if (node["GalleryDetailStripTagMenuHeightRef"] != null)
                             GalleryDetailStripTagMenuHeightRef = Mathf.Max(0f, node["GalleryDetailStripTagMenuHeightRef"].AsFloat);
+                        if (node["GalleryQuickFiltersDetached"] != null)
+                            GalleryQuickFiltersDetached = node["GalleryQuickFiltersDetached"].AsBool;
+                        if (node["GalleryQuickFiltersPosSaved"] != null)
+                            GalleryQuickFiltersPosSaved = node["GalleryQuickFiltersPosSaved"].AsBool;
+                        if (node["GalleryQuickFiltersPosX"] != null)
+                            GalleryQuickFiltersPosX = node["GalleryQuickFiltersPosX"].AsFloat;
+                        if (node["GalleryQuickFiltersPosY"] != null)
+                            GalleryQuickFiltersPosY = node["GalleryQuickFiltersPosY"].AsFloat;
+                        if (node["GalleryQuickFiltersSizeSaved"] != null)
+                            GalleryQuickFiltersSizeSaved = node["GalleryQuickFiltersSizeSaved"].AsBool;
+                        if (node["GalleryQuickFiltersWidthRef"] != null)
+                            GalleryQuickFiltersWidthRef = Mathf.Max(0f, node["GalleryQuickFiltersWidthRef"].AsFloat);
+                        if (node["GalleryQuickFiltersHeightRef"] != null)
+                            GalleryQuickFiltersHeightRef = Mathf.Max(0f, node["GalleryQuickFiltersHeightRef"].AsFloat);
+                        if (node["GalleryImportSidebarDetached"] != null)
+                            GalleryImportSidebarDetached = node["GalleryImportSidebarDetached"].AsBool;
+                        if (node["GalleryImportSidebarPosSaved"] != null)
+                            GalleryImportSidebarPosSaved = node["GalleryImportSidebarPosSaved"].AsBool;
+                        if (node["GalleryImportSidebarPosX"] != null)
+                            GalleryImportSidebarPosX = node["GalleryImportSidebarPosX"].AsFloat;
+                        if (node["GalleryImportSidebarPosY"] != null)
+                            GalleryImportSidebarPosY = node["GalleryImportSidebarPosY"].AsFloat;
+                        if (node["GalleryImportSidebarSizeSaved"] != null)
+                            GalleryImportSidebarSizeSaved = node["GalleryImportSidebarSizeSaved"].AsBool;
+                        if (node["GalleryImportSidebarWidthRef"] != null)
+                            GalleryImportSidebarWidthRef = Mathf.Max(0f, node["GalleryImportSidebarWidthRef"].AsFloat);
+                        if (node["GalleryImportSidebarHeightRef"] != null)
+                            GalleryImportSidebarHeightRef = Mathf.Max(0f, node["GalleryImportSidebarHeightRef"].AsFloat);
+                        if (node["GalleryRemapAtomUidsPosSaved"] != null)
+                            GalleryRemapAtomUidsPosSaved = node["GalleryRemapAtomUidsPosSaved"].AsBool;
+                        if (node["GalleryRemapAtomUidsPosX"] != null)
+                            GalleryRemapAtomUidsPosX = node["GalleryRemapAtomUidsPosX"].AsFloat;
+                        if (node["GalleryRemapAtomUidsPosY"] != null)
+                            GalleryRemapAtomUidsPosY = node["GalleryRemapAtomUidsPosY"].AsFloat;
+                        if (node["GalleryRemapAtomUidsSizeSaved"] != null)
+                            GalleryRemapAtomUidsSizeSaved = node["GalleryRemapAtomUidsSizeSaved"].AsBool;
+                        if (node["GalleryRemapAtomUidsWidthRef"] != null)
+                            GalleryRemapAtomUidsWidthRef = Mathf.Max(0f, node["GalleryRemapAtomUidsWidthRef"].AsFloat);
+                        if (node["GalleryRemapAtomUidsHeightRef"] != null)
+                            GalleryRemapAtomUidsHeightRef = Mathf.Max(0f, node["GalleryRemapAtomUidsHeightRef"].AsFloat);
                         if (node["GalleryOnlyWhenVamMenuVisible"] != null) GalleryOnlyWhenVamMenuVisible = node["GalleryOnlyWhenVamMenuVisible"].AsBool;
                         if (node["GalleryAnchorToVamMenu"] != null) GalleryAnchorToVamMenu = node["GalleryAnchorToVamMenu"].AsBool;
                         if (node["GalleryAnchorOffset"] != null)
@@ -1386,6 +1668,9 @@ namespace VPB
                         if (node["InnerPaneScaleDesktop"] != null) InnerPaneScaleDesktop = node["InnerPaneScaleDesktop"].AsFloat;
                         else InnerPaneScaleDesktop = InnerPaneScale;
                         if (node["GalleryUiScaleUnifiedMigrated"] != null) GalleryUiScaleUnifiedMigrated = node["GalleryUiScaleUnifiedMigrated"].AsBool;
+                        if (node["GalleryUiScaleAutoSeeded"] != null) GalleryUiScaleAutoSeeded = node["GalleryUiScaleAutoSeeded"].AsBool;
+                        if (node["GalleryUiScaleAutoSeedRevision"] != null) GalleryUiScaleAutoSeedRevision = node["GalleryUiScaleAutoSeedRevision"].AsInt;
+                        else if (GalleryUiScaleAutoSeeded) GalleryUiScaleAutoSeedRevision = 1; // pre-revision field = treated as rev1
                         MigrateGalleryUiScaleUnified();
                         if (node["SpringScrollButtonMode"] != null)
                             SpringScrollButtonMode = NormalizeSpringScrollButtonMode(node["SpringScrollButtonMode"].Value);
@@ -1535,6 +1820,9 @@ namespace VPB
             {
                 VPBLogger.Config.LogError("Error loading config: " + ex.Message);
             }
+
+            // First-run pane scale (deferred if Screen.height still 0). Existing cfgs grandfather.
+            try { TryEnsureGalleryUiScaleAutoSeeded(); } catch { }
         }
 
         public void Save()
@@ -1576,11 +1864,7 @@ namespace VPB
                 node["EnableButtonGaps"].AsBool = EnableButtonGaps;
                 node["EnableGalleryElementRounding"].AsBool = EnableGalleryElementRounding;
                 node["GalleryElementCornerRadiusFraction"].AsFloat = ClampGalleryElementCornerRadiusFraction(GalleryElementCornerRadiusFraction);
-                node["FirstRunHintsDismissed"].AsBool = FirstRunHintsDismissed;
                 node["VrHoverTooltipEnabled"].AsBool = VrHoverTooltipEnabled;
-                node["ModeSetupWizardDoneDesktopFixed"].AsBool = ModeSetupWizardDoneDesktopFixed;
-                node["ModeSetupWizardDoneDesktopFloating"].AsBool = ModeSetupWizardDoneDesktopFloating;
-                node["ModeSetupWizardDoneVR"].AsBool = ModeSetupWizardDoneVR;
                 node["ShowSideButtons"] = ShowSideButtons;
                 node["FollowAngle"] = _followAngle;
                 node["FollowDistance"] = _followDistance;
@@ -1612,6 +1896,8 @@ namespace VPB
                 node["RequireDragHoldBeforeMove"].AsBool = RequireDragHoldBeforeMove;
                 node["DragHoldThreshold"].AsFloat = DragHoldThreshold;
                 node["ApplyMode"] = ApplyMode;
+                node["LastContextSceneAction"] = LastContextSceneAction ?? "";
+                node["LastContextAppearanceAction"] = LastContextAppearanceAction ?? "";
                 node["LastGalleryCategory"] = LastGalleryCategory;
                 PerfStepIndex = ClampPerfStepIndex(PerfStepIndex);
                 PerfStepScaleVersion = VpbPerfController.PerfStepScaleVersion;
@@ -1637,6 +1923,9 @@ namespace VPB
                 node["global_source_filter"] = GlobalSourceFilter.ToString();
                 node["GalleryDefaultLeftSidePanel"] = GalleryDefaultLeftSidePanel;
                 node["GalleryDefaultRightSidePanel"] = GalleryDefaultRightSidePanel;
+                node["LastGalleryLeftSidePanel"] = NormalizeGallerySidePanel(LastGalleryLeftSidePanel);
+                node["LastGalleryRightSidePanel"] = NormalizeGallerySidePanel(LastGalleryRightSidePanel);
+                node["LastGallerySideRailsSaved"].AsBool = LastGallerySideRailsSaved;
                 node["GalleryDefaultUserTagAvailMode"] = NormalizeGalleryDefaultUserTagAvailMode(GalleryDefaultUserTagAvailMode);
                 node["GalleryHideUnusedUserTagsInFilterMode"].AsBool = GalleryHideUnusedUserTagsInFilterMode;
                 node["GalleryUserTagFilterCombineMode"] = NormalizeGalleryUserTagFilterCombineMode(GalleryUserTagFilterCombineMode);
@@ -1709,6 +1998,29 @@ namespace VPB
                 node["GalleryScanWlTempBorderColorB"].AsFloat = Mathf.Clamp01(GalleryScanWlTempBorderColorB);
                 node["GalleryScanWlTempBorderColorA"].AsFloat = Mathf.Clamp01(GalleryScanWlTempBorderColorA);
                 node["GalleryScanWlBadgePrimaryV1"].AsBool = GalleryScanWlBadgePrimaryV1;
+                node["CreatorStripKeepMask"].AsInt = CreatorStripKeepMask == 0
+                    ? (int)SceneUtils.CreatorStripKeepDefault
+                    : (CreatorStripKeepMask & (int)SceneUtils.CreatorStripKeepAllUser);
+                node["CreatorStripRecipesJson"] = string.IsNullOrEmpty(CreatorStripRecipesJson)
+                    ? "[]"
+                    : CreatorStripRecipesJson;
+                node["CreatorStripLastRecipeJson"] = CreatorStripLastRecipeJson ?? "";
+                node["CreatorStripPanelPosSaved"].AsBool = CreatorStripPanelPosSaved;
+                node["CreatorStripPanelPosX"].AsFloat = CreatorStripPanelPosX;
+                node["CreatorStripPanelPosY"].AsFloat = CreatorStripPanelPosY;
+                node["CreatorStripPanelSizeSaved"].AsBool = CreatorStripPanelSizeSaved;
+                node["CreatorStripPanelWidthRef"].AsFloat = Mathf.Max(0f, CreatorStripPanelWidthRef);
+                node["CreatorStripPanelHeightRef"].AsFloat = Mathf.Max(0f, CreatorStripPanelHeightRef);
+                node["CreatorStripRemovePossessable"].AsBool = CreatorStripRemovePossessable;
+                node["CreatorStripAddPossessableMale"].AsBool = CreatorStripAddPossessableMale;
+                node["CreatorStripAddPossessableFemale"].AsBool = CreatorStripAddPossessableFemale;
+                node["CreatorStripPersonRenameMode"].AsInt = CreatorStripPersonRenameMode < 0
+                    ? 0
+                    : (CreatorStripPersonRenameMode > 3 ? 3 : CreatorStripPersonRenameMode);
+                node["CreatorStripDefaultSubScenePath"] = CreatorStripDefaultSubScenePath ?? "";
+                node["CreatorStripCreateFillMode"].AsInt = CreatorStripCreateFillMode < 0
+                    ? 0
+                    : (CreatorStripCreateFillMode > 2 ? 2 : CreatorStripCreateFillMode);
                 node["GalleryTboxToolbarPinned"].AsBool = GalleryTboxToolbarPinned;
                 node["GalleryDetailStripExpanded"].AsBool = GalleryDetailStripExpanded;
                 node["GalleryDetailStripSideInfoEnabled"].AsBool = GalleryDetailStripSideInfoEnabled;
@@ -1720,6 +2032,26 @@ namespace VPB
                 node["GalleryDetailStripTagMenuSizeSaved"].AsBool = GalleryDetailStripTagMenuSizeSaved;
                 node["GalleryDetailStripTagMenuWidthRef"].AsFloat = Mathf.Max(0f, GalleryDetailStripTagMenuWidthRef);
                 node["GalleryDetailStripTagMenuHeightRef"].AsFloat = Mathf.Max(0f, GalleryDetailStripTagMenuHeightRef);
+                node["GalleryQuickFiltersDetached"].AsBool = GalleryQuickFiltersDetached;
+                node["GalleryQuickFiltersPosSaved"].AsBool = GalleryQuickFiltersPosSaved;
+                node["GalleryQuickFiltersPosX"].AsFloat = GalleryQuickFiltersPosX;
+                node["GalleryQuickFiltersPosY"].AsFloat = GalleryQuickFiltersPosY;
+                node["GalleryQuickFiltersSizeSaved"].AsBool = GalleryQuickFiltersSizeSaved;
+                node["GalleryQuickFiltersWidthRef"].AsFloat = Mathf.Max(0f, GalleryQuickFiltersWidthRef);
+                node["GalleryQuickFiltersHeightRef"].AsFloat = Mathf.Max(0f, GalleryQuickFiltersHeightRef);
+                node["GalleryImportSidebarDetached"].AsBool = GalleryImportSidebarDetached;
+                node["GalleryImportSidebarPosSaved"].AsBool = GalleryImportSidebarPosSaved;
+                node["GalleryImportSidebarPosX"].AsFloat = GalleryImportSidebarPosX;
+                node["GalleryImportSidebarPosY"].AsFloat = GalleryImportSidebarPosY;
+                node["GalleryImportSidebarSizeSaved"].AsBool = GalleryImportSidebarSizeSaved;
+                node["GalleryImportSidebarWidthRef"].AsFloat = Mathf.Max(0f, GalleryImportSidebarWidthRef);
+                node["GalleryImportSidebarHeightRef"].AsFloat = Mathf.Max(0f, GalleryImportSidebarHeightRef);
+                node["GalleryRemapAtomUidsPosSaved"].AsBool = GalleryRemapAtomUidsPosSaved;
+                node["GalleryRemapAtomUidsPosX"].AsFloat = GalleryRemapAtomUidsPosX;
+                node["GalleryRemapAtomUidsPosY"].AsFloat = GalleryRemapAtomUidsPosY;
+                node["GalleryRemapAtomUidsSizeSaved"].AsBool = GalleryRemapAtomUidsSizeSaved;
+                node["GalleryRemapAtomUidsWidthRef"].AsFloat = Mathf.Max(0f, GalleryRemapAtomUidsWidthRef);
+                node["GalleryRemapAtomUidsHeightRef"].AsFloat = Mathf.Max(0f, GalleryRemapAtomUidsHeightRef);
                 node["GalleryOnlyWhenVamMenuVisible"].AsBool = GalleryOnlyWhenVamMenuVisible;
                 node["GalleryAnchorToVamMenu"].AsBool = GalleryAnchorToVamMenu;
                 JSONClass o = new JSONClass();
@@ -1746,6 +2078,8 @@ namespace VPB
                 node["InnerPaneScaleVR"].AsFloat = InnerPaneScaleVR;
                 node["InnerPaneScaleDesktop"].AsFloat = InnerPaneScaleDesktop;
                 node["GalleryUiScaleUnifiedMigrated"].AsBool = GalleryUiScaleUnifiedMigrated;
+                node["GalleryUiScaleAutoSeeded"].AsBool = GalleryUiScaleAutoSeeded;
+                node["GalleryUiScaleAutoSeedRevision"].AsInt = GalleryUiScaleAutoSeedRevision;
                 node["SpringScrollButtonMode"] = NormalizeSpringScrollButtonMode(SpringScrollButtonMode);
                 node["HoldToLaunchEnabled"].AsBool = HoldToLaunchEnabled;
                 node["TryOnModeEnabled"].AsBool = TryOnModeEnabled;

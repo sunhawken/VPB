@@ -16,9 +16,9 @@ namespace VPB
         private bool importSidebarOpenIntent;
         private bool importSidebarOpenIntentLoaded;
         private bool importSidebarBuilt;
-        // Which physical side of the gallery the sidebar occupies. Set on toggle ON
-        // from leftActiveContent / rightActiveContent so the sidebar replaces whichever
-        // Category / Creator / etc. column is currently open. Default right.
+        // Which physical side of the gallery the sidebar occupies. Locked on toggle ON
+        // (force / rail / config, else heuristic). Persisted as ImportSidebarPrefs.onLeft with open.
+        // Default right when neither force nor persisted side is available.
         private bool importSidebarOnLeft;
         /// <summary>One-shot side lock when applying GalleryDefault*SidePanel = Import from config.</summary>
         private bool? importSidebarForceOnLeft;
@@ -32,7 +32,8 @@ namespace VPB
         private readonly HashSet<VpbResourceType> importSidebarMultiSelectedTypes = new HashSet<VpbResourceType>();
         // User-toggleable (VR-friendly on-screen toggle): true = chips accumulate (multi-select),
         // false = each click selects only the clicked type. Persisted in ImportSidebarPrefs.
-        private bool importSidebarMultiSelectTypes = true;
+        // Default single-select — multi is opt-in (less option-panel stack for novices).
+        private bool importSidebarMultiSelectTypes = false;
         private UnityEngine.UI.Image importSidebarMultiToggleBg;
         private UnityEngine.UI.Text importSidebarMultiToggleLabel;
 
@@ -75,6 +76,9 @@ namespace VPB
         private bool importSidebarSceneAtomSkipDuplicates = true;
         // Scene atoms: off-scene props placed relative to the target person root instead of raw source world coords.
         private bool importSidebarSceneAtomRelativeToPerson = true;
+        // Scene atoms: expert opt-out — when true, Remap Atom UIDs opens only if broken external refs exist.
+        // Default false = always show remap gate (predictable import path).
+        private bool importSidebarRemapUidsOnlyWhenConflicts;
         private string importSidebarSceneAtomSearchFilter = string.Empty;
         // Plugins: when the gate is on, import only the checked subset; selection is per source-atom (the sig
         // tracks scene+atom so switching source resets the checks to none), and is not persisted.
@@ -88,9 +92,15 @@ namespace VPB
         private readonly HashSet<string> importSidebarSelectedPluginKeys = new HashSet<string>(StringComparer.Ordinal);
         private string importSidebarPluginSelectionSig;
 
-        // Cached source scene JSON. One-shot, kept until source scene changes.
+        // Cached source scene JSON. Filled async after open (ThreadPool parse); kept until source changes.
         private JSONClass importSidebarLoadedSceneJSON;
         private readonly List<string> importSidebarSourcePersonIds = new List<string>(4);
+        /// <summary>Bumps on source change / cancel so stale background parses are dropped.</summary>
+        private int importSidebarSceneJsonLoadGen;
+        private Coroutine importSidebarSceneJsonLoadCo;
+        private bool importSidebarSceneJsonLoading;
+        /// <summary>True while person ids still pending (cache-miss async parse).</summary>
+        private bool importSidebarSourcePersonsPending;
 
         // Live target list. Refreshed on atom-add / atom-remove.
         private readonly List<Atom> importSidebarTargetCandidates = new List<Atom>(8);
@@ -100,10 +110,46 @@ namespace VPB
 
         public void ToggleImportSidebar()
         {
+            // Outside Scenes: navigate back so docked Import can reopen (intent may already be on).
+            if (!ImportSidebarCategoryAllowed())
+            {
+                if (!TryNavigateGalleryToScenes())
+                {
+                    try
+                    {
+                        ShowTemporaryStatus(VPBTranslation.T(
+                            "gallery.import.sidebar_gated_tip",
+                            "Import sidebar opens in Scenes category only"), 2f);
+                    }
+                    catch { }
+                    return;
+                }
+                if (importSidebarOpenIntent)
+                {
+                    RefreshImportSidebarCategoryGate();
+                    return;
+                }
+            }
+
             importSidebarOpenIntent = !importSidebarOpenIntent;
             importSidebarOpenIntentLoaded = true;
             RefreshImportSidebarCategoryGate();
             PersistImportSidebarOpenIntent();
+        }
+
+        /// <summary>Switch gallery browse to Scenes so Import source selection works.</summary>
+        private bool TryNavigateGalleryToScenes()
+        {
+            if (ImportSidebarCategoryAllowed()) return true;
+            if (categories == null) return false;
+            for (int i = 0; i < categories.Count; i++)
+            {
+                Gallery.Category c = categories[i];
+                if (!string.Equals(c.name, "Scenes", StringComparison.OrdinalIgnoreCase)) continue;
+                try { Show(c.name, c.extension, c.path); } catch { return false; }
+                return true;
+            }
+            return false;
         }
 
         public void SetImportSidebarActive(bool active)
@@ -148,6 +194,8 @@ namespace VPB
 
             if (active)
             {
+                // Dock vs float host (reparent + chrome) before layout/grid inset.
+                try { SyncImportSidebarHostChromeAfterActivate(); } catch { }
                 // Re-anchor in case the side differs from the previous open.
                 float s = ChromeScale;
                 ApplyImportSidebarBaseRect(s);
@@ -164,6 +212,9 @@ namespace VPB
                     StartCoroutine(DeferredTargetRefreshAfterSceneLoad());
             }
 
+            // Header category chip stays visible; sync before layout so title-bar pin order is correct.
+            try { SyncCategoryQuickSwitchChrome(); } catch { }
+
             // UpdateLayout reads importSidebarActive + importSidebarOnLeft to hide the
             // matching side's tab column and force the gallery offset, so the sidebar
             // replaces (not overlaps) the Category / Creator slot.
@@ -172,14 +223,48 @@ namespace VPB
 
             try { RefreshImportSidebarWizardHeader(); } catch { }
             UpdateImportToggleBtnVisual();
+            try { RefreshModeAmbientChrome(); } catch { }
+            try
+            {
+                ShowTemporaryStatus(
+                    active
+                        ? VPBTranslation.T("gallery.import.opened", "Import sidebar open.")
+                        : VPBTranslation.T("gallery.import.closed", "Import sidebar closed."),
+                    1.25f);
+            }
+            catch { }
         }
 
         public void OpenImportSidebarWith(FileEntry sourceFile, Atom targetAtom)
+        {
+            OpenImportSidebarWithCore(sourceFile, targetAtom, VpbResourceType.Appearance, false);
+        }
+
+        /// <summary>
+        /// Open Scene Import focused on a resource type (e.g. Atoms from floating menu).
+        /// </summary>
+        internal void OpenImportSidebarWith(FileEntry sourceFile, Atom targetAtom, VpbResourceType preferredType)
+        {
+            OpenImportSidebarWithCore(sourceFile, targetAtom, preferredType, true);
+        }
+
+        private void OpenImportSidebarWithCore(
+            FileEntry sourceFile,
+            Atom targetAtom,
+            VpbResourceType preferredType,
+            bool applyPreferredType)
         {
             importSidebarOpenIntent = true;
             importSidebarOpenIntentLoaded = true;
             RefreshImportSidebarCategoryGate();
             PersistImportSidebarOpenIntent();
+
+            if (applyPreferredType)
+            {
+                importSidebarPresetType = preferredType;
+                importSidebarMultiSelectedTypes.Clear();
+                importSidebarMultiSelectedTypes.Add(preferredType);
+            }
 
             if (sourceFile != null)
             {
@@ -191,6 +276,15 @@ namespace VPB
                 RefreshTargetSelectionVisual();
                 RefreshApplyButtonEnabled();
             }
+
+            if (applyPreferredType && importSidebarBuilt && importSidebarActive)
+            {
+                try { OnImportSidebarTypeChosen(preferredType, false); }
+                catch (Exception ex)
+                {
+                    LogUtil.LogWarning("[VPB import] preferred type apply failed: " + ex.Message);
+                }
+            }
         }
 
         // The Scene Import sidebar only makes sense in the Scenes category (its source is a scene's Person atoms).
@@ -199,19 +293,27 @@ namespace VPB
             return currentCategoryTitle == "Scenes";
         }
 
-        // The ONLY caller of SetImportSidebarActive: reconciles visibility to (intent && in-Scenes) on every
-        // intent change and category nav (end of Show), so leaving Scenes hides it and returning restores it.
+        /// <summary>Float outside Scenes: keep panel, freeze source scene/person picks.</summary>
+        private bool ImportSidebarSourceEditsLocked()
+        {
+            return importSidebarDetached && !ImportSidebarCategoryAllowed();
+        }
+
+        // Reconciles visibility on intent change and category nav.
+        // Docked: intent && Scenes. Float: intent alone (survives leaving Scenes; source edits stay locked).
         internal void RefreshImportSidebarCategoryGate()
         {
             bool allowed = ImportSidebarCategoryAllowed();
-            bool shouldBeActive = allowed && importSidebarOpenIntent;
+            bool shouldBeActive = importSidebarOpenIntent && (allowed || importSidebarDetached);
             if (shouldBeActive != importSidebarActive)
                 SetImportSidebarActive(shouldBeActive);
             try { SyncImportSidebarHeaderGateVisual(); } catch { }
             try { UpdateImportToggleBtnVisual(); } catch { }
+            try { RefreshImportSidebarWizardHeader(); } catch { }
+            try { RefreshSceneImportSideButtonVisibility(); } catch { }
         }
 
-        /// <summary>Primary pane only: restore persisted open flag once at init (not per Show, not clones/extra panes).</summary>
+        /// <summary>Primary pane only: restore persisted open flag + dock side once at init (not per Show, not clones/extra panes).</summary>
         private void TryRestoreImportSidebarOpenFromGlobalPref(bool allowRestore)
         {
             if (!allowRestore || importSidebarOpenIntent || importSidebarOpenIntentLoaded) return;
@@ -229,7 +331,13 @@ namespace VPB
             importSidebarOpenIntentLoaded = true;
             if (importSidebarOpenIntent)
             {
+                // Side was never persisted historically; missing key keeps prior default-right heuristic
+                // inside SetImportSidebarActive. When present, force the last docked side (left/right).
+                if (pp != null && pp.HasKey("onLeft"))
+                    importSidebarForceOnLeft = pp["onLeft"].AsBool;
                 try { RefreshImportSidebarCategoryGate(); } catch { }
+                // Backfill onLeft after side lock (migration + keep prefs aligned with live dock).
+                try { PersistImportSidebarOpenIntent(); } catch { }
             }
         }
 
@@ -254,6 +362,12 @@ namespace VPB
             if (source == null) return;
             importSidebarOpenIntent = source.importSidebarOpenIntent;
             importSidebarOnLeft = source.importSidebarOnLeft;
+            importSidebarDetached = source.importSidebarDetached;
+            importSidebarFloatCollapsed = source.importSidebarFloatCollapsed;
+            importSidebarExpandHeightRef = source.importSidebarExpandHeightRef;
+            importSidebarSavedFloatPosCenter = source.importSidebarSavedFloatPosCenter;
+            importSidebarSavedFloatSizeRef = source.importSidebarSavedFloatSizeRef;
+            importSidebarCollapsedTopLeftPos = source.importSidebarCollapsedTopLeftPos;
             importSidebarOpenIntentLoaded = true;
             if (importSidebarOpenIntent)
             {
@@ -267,10 +381,11 @@ namespace VPB
             try { UpdateImportToggleBtnVisual(); } catch { }
         }
 
-        // Reflect the scene already highlighted in the grid into the source list on open, so the user doesn't
-        // have to re-click it. selectedFiles holds the single-click selection (set even while the sidebar is closed).
+        // Reflect gallery selection into import source. Used on open + any selection change while open
+        // (click, keyboard, preview scrub commit). Cheap no-op when inactive / multi-select / same entry.
         private void TryLoadSelectedSceneIntoImportSidebar()
         {
+            if (!importSidebarActive) return;
             if (!ImportSidebarCategoryAllowed()) return;
             if (selectedFiles == null || selectedFiles.Count == 0) return;
             if (ImportSidebarMultiSelectBlocked()) return;
@@ -293,6 +408,7 @@ namespace VPB
             importSidebarPickCUAs                 = PrefBool(p, "pickCUAs", importSidebarPickCUAs);
             importSidebarPickSceneAtoms           = PrefBool(p, "pickSceneAtoms", importSidebarPickSceneAtoms);
             importSidebarSceneAtomSkipDuplicates  = PrefBool(p, "sceneAtomSkipDuplicates", importSidebarSceneAtomSkipDuplicates);
+            importSidebarRemapUidsOnlyWhenConflicts = PrefBool(p, "remapUidsOnlyWhenConflicts", importSidebarRemapUidsOnlyWhenConflicts);
             importSidebarCUARelativeToPerson      = PrefBool(p, "cuaRelativeToPerson", importSidebarCUARelativeToPerson);
             importSidebarCuaMergeLoad             = PrefBool(p, "cuaMergeLoad", importSidebarCuaMergeLoad);
             importSidebarDeleteTargetCUAs         = PrefBool(p, "deleteTargetCUAs", importSidebarDeleteTargetCUAs);
@@ -314,6 +430,11 @@ namespace VPB
                 try { importSidebarPresetType = (VpbResourceType)p["presetType"].AsInt; }
                 catch { }
             }
+            if (p.HasKey("wizardCollapsedMask"))
+            {
+                try { _importWizardCollapsedMask = p["wizardCollapsedMask"].AsInt; }
+                catch { }
+            }
         }
 
         private void SaveImportSidebarPrefs()
@@ -330,6 +451,7 @@ namespace VPB
             p["pickCUAs"].AsBool = importSidebarPickCUAs;
             p["pickSceneAtoms"].AsBool = importSidebarPickSceneAtoms;
             p["sceneAtomSkipDuplicates"].AsBool = importSidebarSceneAtomSkipDuplicates;
+            p["remapUidsOnlyWhenConflicts"].AsBool = importSidebarRemapUidsOnlyWhenConflicts;
             p["cuaRelativeToPerson"].AsBool = importSidebarCUARelativeToPerson;
             p["cuaMergeLoad"].AsBool = importSidebarCuaMergeLoad;
             p["deleteTargetCUAs"].AsBool = importSidebarDeleteTargetCUAs;
@@ -337,7 +459,9 @@ namespace VPB
             p["migratePluginUIDs"].AsBool = importSidebarMigratePluginUIDs;
             p["clearExistingPlugins"].AsBool = importSidebarClearExistingPlugins;
             p["multiSelectTypes"].AsBool = importSidebarMultiSelectTypes;
+            p["wizardCollapsedMask"].AsInt = _importWizardCollapsedMask;
             p["open"].AsBool = importSidebarOpenIntent;
+            p["onLeft"].AsBool = importSidebarOnLeft;
             p["incAppearanceMorphs"].AsBool = importSidebarSubToggles.IncludeAppearanceMorphs;
             p["incPhysicalPoseMorphs"].AsBool = importSidebarSubToggles.IncludePhysicalPoseMorphs;
             p["suppressMorphLoad"].AsBool = importSidebarSubToggles.SuppressMorphLoad;
@@ -355,14 +479,16 @@ namespace VPB
             return (p != null && p.HasKey(key)) ? p[key].AsBool : dflt;
         }
 
-        // Write just the open flag (the four intent-mutating sites can fire before the sidebar is built, so
+        // Write open + dock side only (intent-mutating sites can fire before the sidebar is built, so
         // they must not go through SaveImportSidebarPrefs, which would persist not-yet-loaded toggle defaults).
+        // Call after RefreshImportSidebarCategoryGate so importSidebarOnLeft already reflects the locked side.
         private void PersistImportSidebarOpenIntent()
         {
             VPBConfig cfg = VPBConfig.Instance;
             if (cfg == null) return;
             if (cfg.ImportSidebarPrefs == null) cfg.ImportSidebarPrefs = new JSONClass();
             cfg.ImportSidebarPrefs["open"].AsBool = importSidebarOpenIntent;
+            cfg.ImportSidebarPrefs["onLeft"].AsBool = importSidebarOnLeft;
             try { cfg.Save(false); } catch { }
         }
 

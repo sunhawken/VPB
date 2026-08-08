@@ -541,6 +541,7 @@ namespace VPB
 
         public void OnPointerEnter(PointerEventData eventData)
         {
+            if (!HoverAllowed()) return;
             hovering = true;
             SyncIndicatorVisibility();
         }
@@ -551,9 +552,19 @@ namespace VPB
             SyncIndicatorVisibility();
         }
 
+        /// <summary>No hover chrome on non-interactable Selectables — avoids fake affordance.</summary>
+        private bool HoverAllowed()
+        {
+            Selectable sel = GetComponent<Selectable>();
+            return sel == null || sel.interactable;
+        }
+
         /// <summary>Show/hide rim or <see cref="hoverBorderGO"/> from hover + selection; tint indicator to <see cref="hoverColor"/>.</summary>
         public void SyncIndicatorVisibility()
         {
+            if (!HoverAllowed())
+                hovering = false;
+
             if (hoverBorderGO != null)
             {
                 bool show = hovering || (isSelected && !hoverIndicatorUsesSeparateSelectionVisual);
@@ -786,7 +797,8 @@ namespace VPB
                                 && panel != null && panel.layoutMode == GalleryLayoutMode.Grid;
             if (!labelsActive && card && panel != null && panel.layoutMode == GalleryLayoutMode.Grid)
                 card.SetActive(true);
-            if (panel != null && file != null) panel.SetHoverPath(file);
+            // Claim before sibling deferred-exit runs — otherwise exit restores count over this path (#75).
+            if (panel != null && file != null) panel.ClaimHoverPath(this, file);
             if (panel != null && file != null && panel.layoutMode == GalleryLayoutMode.Grid)
                 panel.ShowGridHoverBadges(gameObject, file);
         }
@@ -802,7 +814,7 @@ namespace VPB
             }
 
             if (card) card.SetActive(false);
-            if (panel != null) panel.RestoreSelectedHoverPath();
+            if (panel != null) panel.ReleaseHoverPath(this);
         }
 
         private System.Collections.IEnumerator DeferredGridBadgeExit()
@@ -828,7 +840,8 @@ namespace VPB
 
             if (card) card.SetActive(false);
             if (panel != null) panel.HideGridHoverBadges(gameObject, force: false);
-            if (panel != null) panel.RestoreSelectedHoverPath();
+            // Ownership gate: sibling enter already claimed — do not wipe path to count (#75).
+            if (panel != null) panel.ReleaseHoverPath(this);
         }
 
         void OnDisable()
@@ -842,6 +855,8 @@ namespace VPB
             if (panel != null && panel.layoutMode == GalleryLayoutMode.Grid)
                 panel.HideGridHoverBadges(gameObject, force: true);
             if (card != null) card.SetActive(false);
+            // Drop path claim if this cell owned it (pool recycle / deactivate mid-hover).
+            if (panel != null) panel.ReleaseHoverPath(this);
         }
 
         Camera ResolveUiCamera()
@@ -889,6 +904,12 @@ namespace VPB
 
         public bool IsHovering => hovering;
 
+        /// <summary>Panel hid preview without a matching Exit — reset so next Enter can fire.</summary>
+        internal void SyncHoverFlagAfterPanelHide()
+        {
+            hovering = false;
+        }
+
         void OnDisable()
         {
             if (!hovering) return;
@@ -929,7 +950,16 @@ namespace VPB
         public void OnPointerEnter(PointerEventData eventData)
         {
             hovering = true;
-            try { if (panel != null && file != null) panel.NotifyHoverPreviewTriggerEntered(this, file); } catch { }
+            try
+            {
+                if (panel != null)
+                {
+                    // Feed laser/mouse sample so ValidateHoverPreviewActive does not use stale Input.mousePosition (#76).
+                    if (eventData != null) panel.currentPointerData = eventData;
+                    if (file != null) panel.NotifyHoverPreviewTriggerEntered(this, file);
+                }
+            }
+            catch { }
         }
 
         public void OnPointerExit(PointerEventData eventData)

@@ -5,11 +5,33 @@ using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.EventSystems;
 using UnityEngine.Events;
+using VPB.src.util;
 
 namespace VPB
 {
     public partial class GalleryPanel : MonoBehaviour
     {
+        /// <summary>
+        /// UI pointer screen position for hit tests. Prefers EventSystem laser/mouse sample
+        /// (<see cref="currentPointerData"/>). Desktop may fall back to <see cref="Input.mousePosition"/>;
+        /// VR without a sample returns false — mouse is not the laser.
+        /// </summary>
+        internal bool TryGetUiPointerScreenPosition(out Vector2 screenPos)
+        {
+            try
+            {
+                if (currentPointerData != null)
+                {
+                    screenPos = currentPointerData.position;
+                    return true;
+                }
+            }
+            catch { }
+
+            screenPos = Input.mousePosition;
+            return !XrUtils.IsVrActive();
+        }
+
         private bool IsPointerInsideGalleryWindowRect()
         {
             if (backgroundBoxGO == null) return false;
@@ -21,6 +43,10 @@ namespace VPB
             }
             if (rt == null) return false;
 
+            Vector2 screenPos;
+            if (!TryGetUiPointerScreenPosition(out screenPos))
+                return false;
+
             Camera cam = null;
             try
             {
@@ -30,7 +56,7 @@ namespace VPB
             }
             catch { cam = null; }
 
-            try { return RectTransformUtility.RectangleContainsScreenPoint(rt, Input.mousePosition, cam); }
+            try { return RectTransformUtility.RectangleContainsScreenPoint(rt, screenPos, cam); }
             catch { return false; }
         }
 
@@ -208,8 +234,13 @@ namespace VPB
 
                         bool isPointerInsideGalleryWindow = IsPointerInsideGalleryWindowRect();
 
+                        // Item drag uses a full-canvas blocker — pointer leaves the pane and AH would
+                        // collapse (SetActive false → UIDraggableItem.OnDisable cancels the drop).
+                        bool galleryItemDragActive = false;
+                        try { galleryItemDragActive = UIDraggableItem.IsDragging; } catch { galleryItemDragActive = false; }
+
                         // If NOT hovering gallery and NOT hovering side buttons and NOT hovering trigger, collapse after delay
-                        bool isHoveringAny = hoverCount > 0 || isPointerInsideGalleryWindow || isHoveringTrigger || isHoveringTriggerManual || IsSettingsPanelOpen();
+                        bool isHoveringAny = hoverCount > 0 || isPointerInsideGalleryWindow || isHoveringTrigger || isHoveringTriggerManual || IsSettingsPanelOpen() || galleryItemDragActive;
                         if (!isHoveringAny)
                         {
                             collapseTimer += Time.deltaTime;
@@ -234,6 +265,7 @@ namespace VPB
 
                     if (canvas.renderMode != RenderMode.ScreenSpaceOverlay)
                     {
+                        DetachWorldSpaceCanvasFromPlayerUi();
                         canvas.renderMode = RenderMode.ScreenSpaceOverlay;
                         canvas.worldCamera = null;
                         canvas.transform.localScale = Vector3.one;
@@ -373,7 +405,8 @@ namespace VPB
                     {
                         canvas.renderMode = RenderMode.WorldSpace;
                         canvas.worldCamera = Camera.main;
-                        canvas.transform.localScale = new Vector3(0.001f, 0.001f, 0.001f);
+                        ResetWorldSpaceCanvasScaleSync();
+                        ApplyWorldSpaceCanvasScale();
                         
                         if (backgroundBoxGO == null) return;
                         RectTransform bgRT = _backgroundBoxRT;
@@ -403,6 +436,13 @@ namespace VPB
                 }
             }
 
+            // WorldSpace: keep pane size independent of VaM worldScale (native mainHUD behavior).
+            if (!isFixedLocally)
+                SyncWorldSpaceCanvasScaleIfWorldScaleChanged();
+
+            // Desktop: re-chrome when VaM Monitor UI Scale changes (HostScale).
+            SyncHostUiScaleIfChanged();
+
             try
             {
                 AdvanceSideButtonsFadeDelayTimer();
@@ -414,19 +454,15 @@ namespace VPB
             if (temporaryStatusOwner != null && !temporaryStatusOwner.activeInHierarchy)
             {
                 // Hover owner went away without delivering an exit event; drop stale tooltip.
+                CancelStickyHoverTooltip();
                 temporaryStatusOwner = null;
                 temporaryStatusMsg = null;
             }
 
-            string finalStatus = null;
-            if (dragStatusMsg != null)
-            {
-                finalStatus = dragStatusMsg;
-            }
-            else if (temporaryStatusMsg != null)
-            {
-                finalStatus = temporaryStatusMsg;
-            }
+            AdvanceStickyHoverTooltip();
+
+            // Mode sticky: toast never blanks ambient modes (concat when both). Drag still wins.
+            string finalStatus = ResolveStatusBarText(dragStatusMsg, temporaryStatusMsg, ModeAmbientMsg);
 
             // When a status message is showing, interrupt any in-progress path fade
             if (!string.IsNullOrEmpty(finalStatus) && hoverPathCanvasGroup != null)
@@ -449,6 +485,8 @@ namespace VPB
                 bool showStatus = !string.IsNullOrEmpty(finalStatus);
                 if (statusBarText.gameObject.activeSelf != showStatus)
                     statusBarText.gameObject.SetActive(showStatus);
+                // Stronger mode cue: tint when sticky modes present (not toast-only).
+                ApplyStatusBarModeTint(ModeAmbientMsg != null);
             }
 
             if (hoverPathText != null)
@@ -702,9 +740,30 @@ namespace VPB
 
             // Ctrl+F — focus title search even when another InputField is selected.
             bool ctrlEarly = Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl);
+            bool shiftEarly = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
             if (ctrlEarly && Input.GetKeyDown(KeyCode.F))
             {
                 try { FocusTitleSearchFromHotkey(); } catch { }
+                return;
+            }
+
+            // Ctrl+Shift+P — command palette (works even with search focused).
+            if (ctrlEarly && shiftEarly && Input.GetKeyDown(KeyCode.P))
+            {
+                try { ToggleCommandPalette(); } catch { }
+                return;
+            }
+            // Alt+F — floating filter presets (not Ctrl+F search). Before InputField gate.
+            bool altEarly = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
+            if (!ctrlEarly && altEarly && Input.GetKeyDown(KeyCode.F))
+            {
+                try { ToggleFloatingQuickFilters(); } catch { }
+                return;
+            }
+            // Alt+I — floating Scene Import (detach if needed; hide keeps float).
+            if (!ctrlEarly && altEarly && Input.GetKeyDown(KeyCode.I))
+            {
+                try { ToggleFloatingImportSidebar(); } catch { }
                 return;
             }
             if (ctrlEarly && Input.GetKeyDown(KeyCode.Z))
@@ -728,11 +787,77 @@ namespace VPB
                     return;
             }
 
+            // Strip keep: Esc ladder + / focus before InputField gate.
+            if (StripKeepHandleSubScenePickKeys())
+                return;
+            if (Input.GetKeyDown(KeyCode.Escape) && _stripKeepShortcutHelpVisible)
+            {
+                HideStripKeepShortcutHelp();
+                return;
+            }
+            if (Input.GetKeyDown(KeyCode.Escape) && _stripKeepAwaitingSoftConfirm)
+            {
+                _stripKeepAwaitingSoftConfirm = false;
+                try { RefreshStripKeepSummaryAndConfirm(); } catch { }
+                return;
+            }
+            if (Input.GetKeyDown(KeyCode.Escape) && IsStripKeepRecipeSaveInlineOpen())
+            {
+                HideStripKeepRecipeSaveInline();
+                return;
+            }
+            if (IsStripKeepRecipeSaveInlineOpen()
+                && (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter)))
+            {
+                CommitStripKeepRecipeSaveInline();
+                return;
+            }
+            if (Input.GetKeyDown(KeyCode.Escape) && _stripKeepRenameOverlayRoot != null)
+            {
+                HideStripKeepRenameOverlay();
+                return;
+            }
+            if (IsStripKeepSelectorOpen() && StripKeepHandleKeyboard())
+                return;
+            if (Input.GetKeyDown(KeyCode.Escape) && IsStripKeepSelectorOpen())
+            {
+                HideStripKeepSelector();
+                return;
+            }
+
+            // Command palette: Esc / arrows / Enter (search field must not trap Esc forever).
+            if (TryHandleCommandPaletteKeyboard())
+                return;
+
+            // In-app help: Esc / F1 before InputField gate (search field must not swallow Esc).
+            if (TryHandleInAppHelpKeyboard(allowQuestionKey: false))
+                return;
+
+            // Remap Atom UIDs float: Esc ladder (filter → collapse → cancel) before InputField gate.
+            if (TryHandleRemapAtomUidsEsc())
+                return;
+
+            // Scene Import float: Esc expand / hide-keep-detach.
+            if (TryHandleImportSidebarFloatEsc())
+                return;
+
+            // Filter presets: Esc modes/hide, arrows/Enter/D/Ctrl+S/U (before InputField gate so rename Esc works).
+            if (quickFiltersUI != null && quickFiltersUI.IsVisible && quickFiltersUI.TryHandleKeyboard())
+                return;
+
             if (EventSystem.current != null && EventSystem.current.currentSelectedGameObject != null)
             {
                 var sel = EventSystem.current.currentSelectedGameObject;
                 if (sel.GetComponent<InputField>() != null) return;
             }
+
+            // Remap Atom UIDs: Enter after InputField gate (collapse picker / Import).
+            if (TryHandleRemapAtomUidsEnter())
+                return;
+
+            // ? / Shift+/ — Hotkeys sheet (recognition). After InputField gate.
+            if (TryHandleInAppHelpKeyboard(allowQuestionKey: true))
+                return;
 
             if (Input.GetKeyDown(KeyCode.Escape) && _titleSearchPopupOpen)
             {
@@ -746,6 +871,25 @@ namespace VPB
                 return;
             }
 
+            if (Input.GetKeyDown(KeyCode.Escape) && creatorModeActive && !creatorModeStripBusy)
+            {
+                ExitCreatorMode();
+                return;
+            }
+
+            if (TryHandleRemoveModeEsc())
+                return;
+
+            if (TryHandleTryOnEsc())
+                return;
+
+            if (TryHandleCleanupModeEsc())
+                return;
+
+            // Docked Import Esc (float handled earlier via TryHandleImportSidebarFloatEsc).
+            if (TryHandleImportSidebarDockedEsc())
+                return;
+
             if (Input.GetKeyDown(KeyCode.Escape)
                 && _detailStripTagMenuRoot != null
                 && _detailStripTagMenuRoot.activeSelf)
@@ -754,6 +898,10 @@ namespace VPB
                 DetailStripTagMenuOnSearchEscape();
                 return;
             }
+
+            // Bare Esc — clear selection when no menu/mode claimed it.
+            if (TryHandleClearSelectionEsc())
+                return;
 
             if (IsVisible && TryConsumeCategoryQuickNumberKey())
                 return;
@@ -780,7 +928,42 @@ namespace VPB
                     if (TryUndoRecentHistoryRemoval())
                         return;
                 }
+                // Ctrl+Shift+Z — Redo; Ctrl+Z — same as footer Undo.
+                if (shift)
+                {
+                    try { Redo(); } catch { }
+                    return;
+                }
+                try { Undo(); } catch { }
+                return;
             }
+            if (ctrl && Input.GetKeyDown(KeyCode.Y))
+            {
+                try { Redo(); } catch { }
+                return;
+            }
+
+            // Ctrl+Shift+K — toggle Scene Tools (side-rail parity).
+            if (ctrl && shift && Input.GetKeyDown(KeyCode.K))
+            {
+                try { ToggleCreatorMode(); } catch { }
+                return;
+            }
+
+            // Ctrl+Shift+E — toggle Scene Eraser.
+            if (ctrl && shift && Input.GetKeyDown(KeyCode.E))
+            {
+                try { ToggleRemoveMode(false, false); } catch { }
+                return;
+            }
+
+            // Ctrl+Shift+S — direct open/close Strip Scene window.
+            if (ctrl && shift && Input.GetKeyDown(KeyCode.S))
+            {
+                try { HotkeyOpenStripSceneDirect(); } catch { }
+                return;
+            }
+
             bool a = Input.GetKeyDown(KeyCode.A);
             bool del = Input.GetKeyDown(KeyCode.Delete) || Input.GetKeyDown(KeyCode.Backspace);
 
@@ -803,6 +986,15 @@ namespace VPB
                         try { TboxDeleteSelectedPackages(); } catch { }
                     }
                 }
+                return;
+            }
+
+            // Enter / Space — apply selection (keyboard expert path). Before arrow early-out.
+            if (Input.GetKeyDown(KeyCode.Return)
+                || Input.GetKeyDown(KeyCode.KeypadEnter)
+                || Input.GetKeyDown(KeyCode.Space))
+            {
+                try { TryKeyboardApplySelection(); } catch { }
                 return;
             }
 

@@ -256,6 +256,14 @@
         "IsDirectory":  false
     },
     {
+        "RelativePath":  "BepInEx/plugins/vpb_icons/chevron_left.png",
+        "IsDirectory":  false
+    },
+    {
+        "RelativePath":  "BepInEx/plugins/vpb_icons/chevron_right.png",
+        "IsDirectory":  false
+    },
+    {
         "RelativePath":  "BepInEx/plugins/vpb_icons/chevron_up.png",
         "IsDirectory":  false
     },
@@ -301,6 +309,10 @@
     },
     {
         "RelativePath":  "BepInEx/plugins/vpb_icons/compress.png",
+        "IsDirectory":  false
+    },
+    {
+        "RelativePath":  "BepInEx/plugins/vpb_icons/creator_mode.png",
         "IsDirectory":  false
     },
     {

@@ -338,6 +338,65 @@ namespace VPB
             }
         }
 
+        /// <summary>
+        /// <see cref="DAZCharacterTextureControl"/> queues nested <c>CharacterQueuedImage</c>.
+        /// Auto genital blend (<c>BlendGenitalTexture</c>) needs CPU <c>GetPixels</c> on torso/genital maps.
+        /// Native <c>ImageLoaderThreaded.Finish</c> uses <c>Apply()</c> (keeps readable); VPB zstd serve must match.
+        /// </summary>
+        internal static bool IsCharacterTextureQueuedImage(ImageLoaderThreaded.QueuedImage qi)
+        {
+            if (qi == null) return false;
+            try
+            {
+                Type t = qi.GetType();
+                return t != null && t.DeclaringType == typeof(DAZCharacterTextureControl);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>Textures that must stay CPU-readable after VPB cache serve (sim maps + character skin).</summary>
+        internal static bool NeedsCpuReadableTexture(ImageLoaderThreaded.QueuedImage qi)
+        {
+            if (qi == null) return false;
+            if (IsCharacterTextureQueuedImage(qi)) return true;
+            return IsSimulationTexturePath(qi.imgPath);
+        }
+
+        /// <summary>GPU blit → readable RGBA32 copy. Caller owns destroy of returned texture when different from <paramref name="src"/>.</summary>
+        internal static Texture2D EnsureCpuReadableTexture(Texture2D src, bool linear, string logTag)
+        {
+            if (src == null) return null;
+            if (IsTextureReadableCompat(src)) return src;
+
+            RenderTexture rt = null;
+            RenderTexture prev = RenderTexture.active;
+            try
+            {
+                rt = RenderTexture.GetTemporary(src.width, src.height, 0, RenderTextureFormat.ARGB32);
+                Graphics.Blit(src, rt);
+                RenderTexture.active = rt;
+                Texture2D readableTex = new Texture2D(src.width, src.height, TextureFormat.RGBA32, false, linear);
+                readableTex.ReadPixels(new Rect(0, 0, src.width, src.height), 0, 0);
+                readableTex.Apply(false, false);
+                if (!string.IsNullOrEmpty(logTag))
+                    LogUtil.Log("[VPB] " + logTag + ": made texture CPU-readable " + src.width + "x" + src.height);
+                return readableTex;
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogError("[VPB] EnsureCpuReadableTexture failed: " + ex.Message);
+                return src;
+            }
+            finally
+            {
+                RenderTexture.active = prev;
+                if (rt != null) RenderTexture.ReleaseTemporary(rt);
+            }
+        }
+
         private static bool IsPluginsAlwaysEnabledSettingOn()
         {
             return true;
@@ -523,11 +582,9 @@ namespace VPB
         // not-yet-registered package (e.g. MacGruber PostMagic's UserLUT enumerating its LUT folder
         // inside a deferred image callback) crash the throw straight through their own callback.
         //
-        // PREFIX: for a package-prefixed directory path, trigger on-demand registration so the
-        //         enumeration resolves to the real files.
-        // FINALIZER: swallow the "non-existent path" throw and return an empty array, matching the
-        //            standard semantics plugins assume, so an unregistered directory degrades to
-        //            "no files" instead of aborting the caller.
+        // PREFIX: register package for uid:/ paths; for bare Custom/ dirs pre-register owners via VPB index.
+        // FINALIZER: on non-existent path, enumerate from VPB package index (PoseMe ExpressionSets live in
+        //            BodyLanguage_Resources) instead of returning empty — empty kills HUD pose thumbs.
         static void PatchGetFiles(Harmony harmony)
         {
             var fm = typeof(MVR.FileManagement.FileManager);
@@ -540,6 +597,7 @@ namespace VPB
                 new[] { typeof(string), typeof(string) },
                 new[] { typeof(string) }
             };
+            int patched = 0;
             foreach (var sig in candidates)
             {
                 var m = AccessTools.Method(fm, "GetFiles", sig);
@@ -547,19 +605,47 @@ namespace VPB
                 harmony.Patch(m,
                     prefix: prefix != null ? new HarmonyMethod(prefix) : null,
                     finalizer: finalizer != null ? new HarmonyMethod(finalizer) : null);
-                return;
+                patched++;
             }
+            if (patched == 0)
+                LogUtil.LogWarning("[VPB] FileManager.GetFiles patch: no overloads found");
         }
 
-        public static void PreGetFiles(string __0)
+        public static void PreGetFiles(ref string __0)
         {
             try
             {
                 if (VamOnDemandLoader.s_InOnDemand) return;
+                if (string.IsNullOrEmpty(__0)) return;
+
+                // Fast reject — most GetFiles calls are uid:/ or Saves/ (not bare Custom/).
+                if (!PathLooksLikeBareOrBrokenCustom(__0))
+                {
+                    if (ScanWhitelistManager.Instance == null || !ScanWhitelistManager.Instance.IsEnabled) return;
+                    string uidQuick = VamOnDemandLoader.UidFromEntryPath(__0);
+                    if (string.IsNullOrEmpty(uidQuick)) return;
+                    VamOnDemandLoader.s_InOnDemand = true;
+                    try { VamOnDemandLoader.TryRegisterPackageOnDemand(uidQuick); }
+                    finally { VamOnDemandLoader.s_InOnDemand = false; }
+                    return;
+                }
+
+                // Rewrite bare Custom/ → uid:/Custom/... only when not present on disk
+                // (session/loose Custom/Scripts must stay bare — see TryRewriteBareCustomPath).
+                string bareBefore = __0;
+                TryRewriteBareCustomPath(ref __0);
+
                 if (ScanWhitelistManager.Instance == null || !ScanWhitelistManager.Instance.IsEnabled) return;
 
                 string uid = VamOnDemandLoader.UidFromEntryPath(__0);
-                if (string.IsNullOrEmpty(uid)) return;
+                if (string.IsNullOrEmpty(uid))
+                {
+                    // Local disk already satisfies this path — skip package-owner scan (warm path).
+                    string localCheck = NormalizeBareCustomInternalPath(bareBefore);
+                    if (string.IsNullOrEmpty(localCheck) || !LocalCustomPathExistsOnDisk(localCheck))
+                        TryRegisterOwnersForBareCustomDir(__0);
+                    return;
+                }
 
                 VamOnDemandLoader.s_InOnDemand = true;
                 try { VamOnDemandLoader.TryRegisterPackageOnDemand(uid); }
@@ -577,9 +663,255 @@ namespace VPB
             if (msg.IndexOf("non-existent path", StringComparison.OrdinalIgnoreCase) < 0)
                 return __exception;
 
-            __result = new string[0];
-            LogUtil.LogWarning("[VPB] FileManager.GetFiles non-existent path suppressed (returned empty): " + __0);
+            // Always "*" — GetFiles(string) overloads have no pattern arg; injecting __1 breaks that patch.
+            string[] fromPkgs;
+            if (TryGetFilesFromPackageIndex(__0, "*", out fromPkgs) && fromPkgs != null && fromPkgs.Length > 0)
+            {
+                __result = fromPkgs;
+                return null;
+            }
+
+            __result = s_EmptyStringArray;
+            // Rate-limit: BodyLanguage can hammer missing morph dirs; avoid log spam alloc.
+            if (ShouldLogGetFilesEmpty(__0))
+                LogUtil.LogWarning("[VPB] FileManager.GetFiles non-existent path suppressed (returned empty): " + __0);
             return null;
+        }
+
+        static readonly string[] s_EmptyStringArray = new string[0];
+
+        static float s_GetFilesEmptyLogRealtime;
+        static string s_GetFilesEmptyLogLastPath;
+        static bool ShouldLogGetFilesEmpty(string path)
+        {
+            try
+            {
+                float now = Time.realtimeSinceStartup;
+                if (now - s_GetFilesEmptyLogRealtime < 2f
+                    && string.Equals(s_GetFilesEmptyLogLastPath, path, StringComparison.OrdinalIgnoreCase))
+                    return false;
+                s_GetFilesEmptyLogRealtime = now;
+                s_GetFilesEmptyLogLastPath = path;
+                return true;
+            }
+            catch { return true; }
+        }
+
+        /// <summary>True for bare Custom/... or broken ":/Custom/..." (null packageUid concat).</summary>
+        static bool PathLooksLikeBareOrBrokenCustom(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            // Cheap reject before slash normalize.
+            if (path.IndexOf("Custom", StringComparison.OrdinalIgnoreCase) < 0) return false;
+            int colon = path.IndexOf(":/", StringComparison.Ordinal);
+            if (colon > 0) return false; // package-qualified
+            return true; // bare Custom or ":/Custom"
+        }
+
+        /// <summary>
+        /// Normalize bare / broken-null Custom path to internal form (forward slashes, no leading /).
+        /// Returns null when not a Custom/ path.
+        /// </summary>
+        static string NormalizeBareCustomInternalPath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return null;
+            string p = path;
+            if (p.IndexOf('\\') >= 0) p = p.Replace('\\', '/');
+            if (p.Length > 0 && p[0] == '/') p = p.Substring(1);
+
+            // Heal BodyLanguage null+":/" → ":/Custom/..."
+            int colon = p.IndexOf(":/", StringComparison.Ordinal);
+            if (colon == 0)
+                p = p.Substring(2);
+            else if (colon > 0)
+                return null;
+
+            if (!p.StartsWith("Custom/", StringComparison.OrdinalIgnoreCase)) return null;
+            return p;
+        }
+
+        /// <summary>
+        /// True when <paramref name="normalizedCustomPath"/> exists as a real file or directory
+        /// under the VaM game root (process CWD). Does not call FileManager (avoids hook recursion).
+        /// </summary>
+        static bool LocalCustomPathExistsOnDisk(string normalizedCustomPath)
+        {
+            if (string.IsNullOrEmpty(normalizedCustomPath)) return false;
+            try
+            {
+                // System.IO accepts '/' on Windows; VaM CWD is the game root.
+                if (File.Exists(normalizedCustomPath)) return true;
+                if (Directory.Exists(normalizedCustomPath)) return true;
+            }
+            catch { }
+            return false;
+        }
+
+        /// <summary>
+        /// Bare Custom/... → first VPB-indexed uid:/Custom/... (registers owner). Used by load/exists/open.
+        /// Prefers on-disk Custom/ (session plugins, loose Scripts) over package remap so FileExists
+        /// does not steer away from local files into an unregistered/wrong VAR (ac9b50f9 / #77).
+        /// Package-only bare paths (PoseMe ExpressionSets, BodyLanguage) still remap.
+        /// </summary>
+        static bool TryRewriteBareCustomPath(ref string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            if (!PathLooksLikeBareOrBrokenCustom(path)) return false;
+
+            string p = NormalizeBareCustomInternalPath(path);
+            if (string.IsNullOrEmpty(p)) return false;
+
+            // Session / loose Custom/Scripts (and any other on-disk Custom/) win over VAR index.
+            if (LocalCustomPathExistsOnDisk(p)) return false;
+
+            string uidPath;
+            if (!FileManager.TryResolveCustomInternalPathToUidPath(p, out uidPath) || string.IsNullOrEmpty(uidPath))
+                return false;
+
+            try
+            {
+                string uid = VamOnDemandLoader.UidFromEntryPath(uidPath);
+                if (!string.IsNullOrEmpty(uid))
+                {
+                    bool script = uidPath.IndexOf(":/Custom/Scripts/", StringComparison.OrdinalIgnoreCase) >= 0;
+                    VamOnDemandLoader.TryRegisterPackageOnDemand(uid, persistUidOverride: script);
+                }
+            }
+            catch { }
+
+            path = uidPath;
+            return true;
+        }
+
+        // Main-thread scratch — reentrancy falls back to local lists.
+        static List<FileEntry> s_VarFilesScratch;
+        static List<string> s_UidListScratch;
+        static int s_VarFilesScratchDepth;
+
+        static void TryRegisterOwnersForBareCustomDir(string dirPath)
+        {
+            if (string.IsNullOrEmpty(dirPath)) return;
+            string p = dirPath;
+            if (p.IndexOf('\\') >= 0) p = p.Replace('\\', '/');
+            p = p.Trim().TrimEnd('/');
+            if (p.Length > 0 && p[0] == '/') p = p.Substring(1);
+            if (!p.StartsWith("Custom/", StringComparison.OrdinalIgnoreCase)) return;
+
+            List<FileEntry> entries;
+            bool pooled = s_VarFilesScratchDepth == 0;
+            if (pooled)
+            {
+                if (s_VarFilesScratch == null) s_VarFilesScratch = new List<FileEntry>(64);
+                else s_VarFilesScratch.Clear();
+                entries = s_VarFilesScratch;
+                s_VarFilesScratchDepth++;
+            }
+            else
+            {
+                entries = new List<FileEntry>(32);
+            }
+
+            try
+            {
+                try { FileManager.FindVarFiles(p, "*", entries); }
+                catch { return; }
+
+                for (int i = 0; i < entries.Count; i++)
+                {
+                    VarFileEntry vfe = entries[i] as VarFileEntry;
+                    if (vfe == null || vfe.Package == null || string.IsNullOrEmpty(vfe.Package.Uid)) continue;
+                    try
+                    {
+                        bool script = p.StartsWith("Custom/Scripts/", StringComparison.OrdinalIgnoreCase);
+                        VamOnDemandLoader.TryRegisterPackageOnDemand(vfe.Package.Uid, persistUidOverride: script);
+                    }
+                    catch { }
+                }
+            }
+            finally
+            {
+                if (pooled)
+                {
+                    s_VarFilesScratch.Clear();
+                    s_VarFilesScratchDepth--;
+                }
+            }
+        }
+
+        static bool TryGetFilesFromPackageIndex(string dirPath, string pattern, out string[] files)
+        {
+            files = null;
+            if (string.IsNullOrEmpty(dirPath)) return false;
+            string p = dirPath;
+            if (p.IndexOf('\\') >= 0) p = p.Replace('\\', '/');
+            p = p.Trim().TrimEnd('/');
+            if (p.Length > 0 && p[0] == '/') p = p.Substring(1);
+
+            // Accept uid:/Custom/..., bare Custom/..., and broken ":/Custom/..." (null+":/" packageUid).
+            string internalDir = p;
+            int colon = p.IndexOf(":/", StringComparison.Ordinal);
+            if (colon >= 0)
+                internalDir = p.Substring(colon + 2);
+            if (internalDir.Length > 0 && internalDir[0] == '/')
+                internalDir = internalDir.Substring(1);
+
+            if (!internalDir.StartsWith("Custom/", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            string pat = string.IsNullOrEmpty(pattern) ? "*" : pattern;
+
+            List<FileEntry> entries;
+            List<string> list;
+            bool pooled = s_VarFilesScratchDepth == 0;
+            if (pooled)
+            {
+                if (s_VarFilesScratch == null) s_VarFilesScratch = new List<FileEntry>(64);
+                else s_VarFilesScratch.Clear();
+                if (s_UidListScratch == null) s_UidListScratch = new List<string>(64);
+                else s_UidListScratch.Clear();
+                entries = s_VarFilesScratch;
+                list = s_UidListScratch;
+                s_VarFilesScratchDepth++;
+            }
+            else
+            {
+                entries = new List<FileEntry>(64);
+                list = new List<string>(64);
+            }
+
+            try
+            {
+                try { FileManager.FindVarFiles(internalDir, pat, entries); }
+                catch { return false; }
+
+                if (entries.Count == 0) return false;
+
+                for (int i = 0; i < entries.Count; i++)
+                {
+                    FileEntry e = entries[i];
+                    if (e == null || string.IsNullOrEmpty(e.Uid)) continue;
+                    VarFileEntry vfe = e as VarFileEntry;
+                    if (vfe != null && vfe.Package != null && !string.IsNullOrEmpty(vfe.Package.Uid))
+                    {
+                        try { VamOnDemandLoader.TryRegisterPackageOnDemand(vfe.Package.Uid); }
+                        catch { }
+                    }
+                    list.Add(e.Uid);
+                }
+
+                if (list.Count == 0) return false;
+                files = list.ToArray();
+                return true;
+            }
+            finally
+            {
+                if (pooled)
+                {
+                    s_VarFilesScratch.Clear();
+                    s_UidListScratch.Clear();
+                    s_VarFilesScratchDepth--;
+                }
+            }
         }
 
         static void PatchFileExists(Harmony harmony)
@@ -695,6 +1027,9 @@ namespace VPB
                     path = rewritten;
                 }
 
+                // Bare Custom/ (PoseMe ExpressionSets, BodyLanguage audiobundles) → owning package UID.
+                TryRewriteBareCustomPath(ref path);
+
                 string best = VamOnDemandLoader.RewriteEntryPathToBestAvailable(path, attemptRegister: true);
                 if (!string.Equals(best, path, StringComparison.OrdinalIgnoreCase))
                 {
@@ -707,7 +1042,7 @@ namespace VPB
             }
         }
 
-        public static bool PreFileExists(string __0, ref bool __result)
+        public static bool PreFileExists(ref string __0, ref bool __result)
         {
             if (VamStartupOptimizations.ShouldSkipVamXFileExistsWork(__0))
             {
@@ -717,6 +1052,7 @@ namespace VPB
 
             // Same defensive wrap as PreNormalizeLoadPath: FileExists is on the trigger restore
             // path too, and an unguarded throw breaks MacGruber-style per-state JSON loops.
+            // Must use ref __0 — non-ref rewrites were no-ops (Harmony only rebinds ref args).
             try
             {
                 string rewritten = RewriteVdsPathIfNeeded(__0);
@@ -724,6 +1060,8 @@ namespace VPB
                 {
                     __0 = rewritten;
                 }
+
+                TryRewriteBareCustomPath(ref __0);
 
                 string best = VamOnDemandLoader.RewriteEntryPathToBestAvailable(__0, attemptRegister: true);
                 if (!string.Equals(best, __0, StringComparison.OrdinalIgnoreCase))
@@ -764,21 +1102,25 @@ namespace VPB
                 if (result) return;
                 if (onlySystemFiles) return;
                 if (!ScanWhitelistManager.Instance.IsEnabled) return;
-                if (VamOnDemandLoader.s_InOnDemand) return;
 
-                string uid = VamOnDemandLoader.UidFromEntryPath(path);
-                if (string.IsNullOrEmpty(uid)) return;
-                LogUtil.RecordVarEntryMiss();
+                bool entered;
+                bool prev;
+                entered = VamOnDemandLoader.TryEnterOnDemandGuard(out prev);
+                if (!entered) return;
 
-                if (VamOnDemandLoader.ShouldDeferStartupOnDemandForPath(path, uid))
-                    return;
-
-                if (VpbPerfDiag.CachedEnabled) VpbPerfDiag.FileExistsHookHeavy++;
-                LogUtil.RecordOnDemandRetry();
-                VamOnDemandLoader.TryRegisterPackageOnDemandForEntryPath(path);
-                VamOnDemandLoader.s_InOnDemand = true;
                 try
                 {
+                    string uid = VamOnDemandLoader.UidFromEntryPath(path);
+                    if (string.IsNullOrEmpty(uid)) return;
+                    LogUtil.RecordVarEntryMiss();
+
+                    if (VamOnDemandLoader.ShouldDeferStartupOnDemandForPath(path, uid))
+                        return;
+
+                    if (VpbPerfDiag.CachedEnabled) VpbPerfDiag.FileExistsHookHeavy++;
+                    LogUtil.RecordOnDemandRetry();
+                    VamOnDemandLoader.TryRegisterPackageOnDemandForEntryPath(path);
+
                     if (MVR.FileManagement.FileManager.GetVarFileEntry(path) != null)
                     {
                         result = true;
@@ -797,6 +1139,7 @@ namespace VPB
 
                     // VaM may also request a specific version that isn't installed anymore
                     // (e.g. Author.Pkg.11), while a newer version exists (e.g. .14).
+                    if (result) return;
                     string rewrittenBest = VamOnDemandLoader.TryRewriteBestAvailableEntryPath(path, attemptRegister: true);
                     if (!string.IsNullOrEmpty(rewrittenBest) && !string.Equals(rewrittenBest, path, StringComparison.OrdinalIgnoreCase))
                     {
@@ -807,7 +1150,7 @@ namespace VPB
                 }
                 finally
                 {
-                    VamOnDemandLoader.s_InOnDemand = false;
+                    VamOnDemandLoader.ExitOnDemandGuard(prev);
                 }
             }
             catch (Exception ex)
@@ -825,6 +1168,7 @@ namespace VPB
             {
                 path = rewritten;
             }
+            TryRewriteBareCustomPath(ref path);
         }
 
         [HarmonyPostfix]
@@ -843,6 +1187,7 @@ namespace VPB
             {
                 path = rewritten;
             }
+            TryRewriteBareCustomPath(ref path);
         }
 
         [HarmonyPostfix]
@@ -1093,6 +1438,8 @@ namespace VPB
             LogUtil.BeginSceneLoad(saveName);
             LogUtil.MarkScenePhasePreLoadInternal();
             try { ThirdPartyFixHook.TryClearInGameLogsOnSceneLaunch(__instance, loadMerge); } catch { }
+            // Scene Loader / VAM Browser / triggers all funnel here — record History outside VPB gallery UI.
+            try { VpbLocalDatabase.TryRecordItemUseFromPath(saveName, "scene"); } catch { }
             try
             {
                 // Clear sim texture registry for new scene
@@ -1167,6 +1514,8 @@ namespace VPB
         [HarmonyPatch(typeof(SuperController), "RemoveAtom", new Type[] { typeof(Atom) })]
         public static void PostRemoveAtom(SuperController __instance, Atom atom)
         {
+            // Bulk strip suppresses per-atom gallery sync (one notify at end).
+            if (GalleryPanel.SuppressAtomRemovedGalleryNotify) return;
             try { GalleryPanel.NotifyAllPanelsSceneTargetsChanged(); } catch { }
         }
 
@@ -1530,8 +1879,8 @@ namespace VPB
             // Ignore hub browse
             if (__instance.tex != null)
             {
-                // Fix up simulation textures that were loaded as non-readable by VaM's native loader
-                if (IsSimulationTexturePath(__instance.imgPath))
+                // Sim maps + DAZCharacterTextureControl maps: VaM needs CPU read (sim plugins / auto genital blend).
+                if (NeedsCpuReadableTexture(__instance))
                 {
                     try
                     {
@@ -1548,30 +1897,22 @@ namespace VPB
                             var tex = __instance.tex as Texture2D;
                             if (tex != null && !IsTextureReadableCompat(tex))
                             {
-                                LogUtil.Log($"[VPB SIM] PostFinish: Fixing up non-readable sim texture: {__instance.imgPath}");
+                                string tag = IsCharacterTextureQueuedImage(__instance) ? "CHAR" : "SIM";
+                                LogUtil.Log("[VPB " + tag + "] PostFinish: Fixing up non-readable texture: " + __instance.imgPath);
 
-                                // Recreate as readable using GPU copy -> ReadPixels.
-                                RenderTexture rt = RenderTexture.GetTemporary(tex.width, tex.height, 0, RenderTextureFormat.ARGB32);
-                                Graphics.Blit(tex, rt);
-
-                                RenderTexture prev = RenderTexture.active;
-                                RenderTexture.active = rt;
-                                Texture2D readableTex = new Texture2D(tex.width, tex.height, TextureFormat.RGBA32, false, __instance.linear);
-                                readableTex.ReadPixels(new Rect(0, 0, tex.width, tex.height), 0, 0);
-                                readableTex.Apply(false, false); // keep readable
-                                RenderTexture.active = prev;
-                                RenderTexture.ReleaseTemporary(rt);
-
-                                UnityEngine.Object.Destroy(tex);
-                                __instance.tex = readableTex;
-
-                                LogUtil.Log($"[VPB SIM] PostFinish: Fixed sim texture to be readable: {__instance.imgPath}");
+                                Texture2D readableTex = EnsureCpuReadableTexture(tex, __instance.linear, null);
+                                if (readableTex != null && readableTex != tex)
+                                {
+                                    UnityEngine.Object.Destroy(tex);
+                                    __instance.tex = readableTex;
+                                    LogUtil.Log("[VPB " + tag + "] PostFinish: Fixed texture to be readable: " + __instance.imgPath);
+                                }
                             }
                         }
                     }
                     catch (Exception ex)
                     {
-                        LogUtil.LogError($"[VPB SIM] PostFinish: Failed to fix up sim texture {__instance.imgPath}: {ex.Message}");
+                        LogUtil.LogError("[VPB] PostFinish: Failed to fix up readable texture " + __instance.imgPath + ": " + ex.Message);
                     }
                 }
 
@@ -1595,7 +1936,14 @@ namespace VPB
 
             if (DAZMorphMgr.singleton.cache.ContainsKey(path))
             {
-                LogUtil.Log("LoadDeltas use cache:" + path);
+                try
+                {
+                    if (Settings.Instance != null
+                        && Settings.Instance.LogMorphDeltaCacheHits != null
+                        && Settings.Instance.LogMorphDeltaCacheHits.Value)
+                        LogUtil.Log("LoadDeltas use cache:" + path);
+                }
+                catch { }
                 __instance.deltas = DAZMorphMgr.singleton.cache[path];
                 return;
             }
@@ -1743,21 +2091,25 @@ namespace VPB
                 if (VpbPerfDiag.CachedEnabled) VpbPerfDiag.GetVarEntryHook++;
                 if (__result != null) return;
                 if (!ScanWhitelistManager.Instance.IsEnabled) return;
-                if (VamOnDemandLoader.s_InOnDemand) return;
 
-                string uid = VamOnDemandLoader.UidFromEntryPath(path);
-                if (string.IsNullOrEmpty(uid)) return;
-                LogUtil.RecordVarEntryMiss();
+                bool entered;
+                bool prev;
+                entered = VamOnDemandLoader.TryEnterOnDemandGuard(out prev);
+                if (!entered) return;
 
-                if (VamOnDemandLoader.ShouldDeferStartupOnDemandForPath(path, uid))
-                    return;
-
-                if (VpbPerfDiag.CachedEnabled) VpbPerfDiag.GetVarEntryHookHeavy++;
-                LogUtil.RecordOnDemandRetry();
-                VamOnDemandLoader.TryRegisterPackageOnDemandForEntryPath(path);
-                VamOnDemandLoader.s_InOnDemand = true;
                 try
                 {
+                    string uid = VamOnDemandLoader.UidFromEntryPath(path);
+                    if (string.IsNullOrEmpty(uid)) return;
+                    LogUtil.RecordVarEntryMiss();
+
+                    if (VamOnDemandLoader.ShouldDeferStartupOnDemandForPath(path, uid))
+                        return;
+
+                    if (VpbPerfDiag.CachedEnabled) VpbPerfDiag.GetVarEntryHookHeavy++;
+                    LogUtil.RecordOnDemandRetry();
+                    VamOnDemandLoader.TryRegisterPackageOnDemandForEntryPath(path);
+
                     __result = MVR.FileManagement.FileManager.GetVarFileEntry(path);
                     if (__result != null) return;
 
@@ -1771,8 +2123,9 @@ namespace VPB
                     }
 
                     // Also handle versioned UIDs where the requested version doesn't exist.
+                    if (__result != null) return;
                     string rewrittenBest = VamOnDemandLoader.TryRewriteBestAvailableEntryPath(path, attemptRegister: true);
-                    if (__result == null && !string.IsNullOrEmpty(rewrittenBest) && !string.Equals(rewrittenBest, path, StringComparison.OrdinalIgnoreCase))
+                    if (!string.IsNullOrEmpty(rewrittenBest) && !string.Equals(rewrittenBest, path, StringComparison.OrdinalIgnoreCase))
                     {
                         LogUtil.RecordOnDemandRetry();
                         __result = MVR.FileManagement.FileManager.GetVarFileEntry(rewrittenBest);
@@ -1780,12 +2133,163 @@ namespace VPB
                 }
                 finally
                 {
-                    VamOnDemandLoader.s_InOnDemand = false;
+                    VamOnDemandLoader.ExitOnDemandGuard(prev);
                 }
             }
             catch (Exception ex)
             {
                 LogUtil.LogWarning("[VPB OnDemand] PostGetVarFileEntryOnDemand error: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Issue #12: plugins calling native <c>FileManager.GetPackage</c> must see scan-excluded
+        /// packages once requested. Register on demand and retry (no full catalog Refresh here).
+        /// Preserves native semantics: exact UID miss stays null (no silent version swap).
+        /// </summary>
+        [HarmonyPostfix]
+        [HarmonyPatch(typeof(MVR.FileManagement.FileManager), "GetPackage", new Type[] { typeof(string) })]
+        public static void PostGetPackageOnDemand(string packageUidOrPath, ref MVR.FileManagement.VarPackage __result)
+        {
+            try
+            {
+                if (__result != null) return;
+                if (!ScanWhitelistManager.Instance.IsEnabled) return;
+                if (string.IsNullOrEmpty(packageUidOrPath)) return;
+                if (VamOnDemandLoader.IsRawVarFilesystemPath(packageUidOrPath)) return;
+
+                // Native Refresh / pre-first-Refresh: leave miss as null. Do NOT enqueue —
+                // VaM walks every package and GetPackage/IsPackage miss thousands of times;
+                // enqueue+promote caused RegisterNow zip-scan storm + crash (log 22).
+                if (VamOnDemandLoader.ShouldDeferHeavyOnDemandProbe())
+                    return;
+
+                bool entered;
+                bool prev;
+                entered = VamOnDemandLoader.TryEnterOnDemandGuard(out prev);
+                if (!entered) return;
+                try
+                {
+                    VamOnDemandLoader.TryRegisterPackageOnDemand(packageUidOrPath);
+                    __result = MVR.FileManagement.FileManager.GetPackage(packageUidOrPath);
+                    if (__result != null) return;
+
+                    // Native .latest resolves via package group — ensure a concrete version is registered.
+                    if (packageUidOrPath.EndsWith(".latest", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string best = VamOnDemandLoader.TryGetNewestInstalledUid(packageUidOrPath);
+                        if (!string.IsNullOrEmpty(best)
+                            && !string.Equals(best, packageUidOrPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            VamOnDemandLoader.TryRegisterPackageOnDemand(best);
+                            __result = MVR.FileManagement.FileManager.GetPackage(packageUidOrPath);
+                            if (__result == null)
+                                __result = MVR.FileManagement.FileManager.GetPackage(best);
+                        }
+                    }
+                }
+                finally
+                {
+                    VamOnDemandLoader.ExitOnDemandGuard(prev);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogWarning("[VPB OnDemand] PostGetPackageOnDemand error: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Issue #12: <c>IsPackage</c> probes must match GetPackage on-demand registration.
+        /// Never returns true for a different UID than requested.
+        /// </summary>
+        [HarmonyPostfix]
+        [HarmonyPatch(typeof(MVR.FileManagement.FileManager), "IsPackage", new Type[] { typeof(string) })]
+        public static void PostIsPackageOnDemand(string packageUidOrPath, ref bool __result)
+        {
+            try
+            {
+                if (__result) return;
+                if (!ScanWhitelistManager.Instance.IsEnabled) return;
+                if (string.IsNullOrEmpty(packageUidOrPath)) return;
+                if (VamOnDemandLoader.IsRawVarFilesystemPath(packageUidOrPath)) return;
+
+                // Same as GetPackage: no enqueue during Refresh (probe noise → register storm).
+                if (VamOnDemandLoader.ShouldDeferHeavyOnDemandProbe())
+                    return;
+
+                bool entered;
+                bool prev;
+                entered = VamOnDemandLoader.TryEnterOnDemandGuard(out prev);
+                if (!entered) return;
+                try
+                {
+                    VamOnDemandLoader.TryRegisterPackageOnDemand(packageUidOrPath);
+                    __result = MVR.FileManagement.FileManager.IsPackage(packageUidOrPath);
+                    if (__result) return;
+
+                    if (packageUidOrPath.EndsWith(".latest", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string best = VamOnDemandLoader.TryGetNewestInstalledUid(packageUidOrPath);
+                        if (!string.IsNullOrEmpty(best)
+                            && !string.Equals(best, packageUidOrPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            VamOnDemandLoader.TryRegisterPackageOnDemand(best);
+                            // .latest is not itself a packagesByUid key — true if concrete version registered.
+                            __result = MVR.FileManagement.FileManager.IsPackage(best);
+                        }
+                    }
+                }
+                finally
+                {
+                    VamOnDemandLoader.ExitOnDemandGuard(prev);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogWarning("[VPB OnDemand] PostIsPackageOnDemand error: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Issue #12: <c>GetPackageGroup</c> after on-demand register so <c>.latest</c>/<c>.minN</c> resolve.
+        /// </summary>
+        [HarmonyPostfix]
+        [HarmonyPatch(typeof(MVR.FileManagement.FileManager), "GetPackageGroup", new Type[] { typeof(string) })]
+        public static void PostGetPackageGroupOnDemand(string packageGroupUid, ref MVR.FileManagement.VarPackageGroup __result)
+        {
+            try
+            {
+                if (__result != null) return;
+                if (!ScanWhitelistManager.Instance.IsEnabled) return;
+                if (string.IsNullOrEmpty(packageGroupUid)) return;
+                if (packageGroupUid.IndexOf('.') < 0) return;
+
+                // Same as GetPackage: no enqueue during Refresh.
+                if (VamOnDemandLoader.ShouldDeferHeavyOnDemandProbe())
+                    return;
+
+                bool entered;
+                bool prev;
+                entered = VamOnDemandLoader.TryEnterOnDemandGuard(out prev);
+                if (!entered) return;
+                try
+                {
+                    // packageGroupUid is "Author.Pkg" — never append if caller already passed ".latest".
+                    string latestReq = packageGroupUid;
+                    if (!latestReq.EndsWith(".latest", StringComparison.OrdinalIgnoreCase))
+                        latestReq = packageGroupUid + ".latest";
+                    VamOnDemandLoader.TryRegisterPackageOnDemand(latestReq);
+                    __result = MVR.FileManagement.FileManager.GetPackageGroup(packageGroupUid);
+                }
+                finally
+                {
+                    VamOnDemandLoader.ExitOnDemandGuard(prev);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogWarning("[VPB OnDemand] PostGetPackageGroupOnDemand error: " + ex.Message);
             }
         }
     }

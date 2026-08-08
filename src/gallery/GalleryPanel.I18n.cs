@@ -158,8 +158,10 @@ namespace VPB
             if (leftSaveBtnIconImage == null) RefreshGoText(leftSaveBtnGO, "gallery.side.save", "Save");
             if (rightRemoveAtomBtnIconImage == null) RefreshGoText(rightRemoveAtomBtn, "gallery.side.remove", "Remove");
             if (leftRemoveAtomBtnIconImage == null) RefreshGoText(leftRemoveAtomBtn, "gallery.side.remove", "Remove");
-            if (rightRemoveAllClothingBtnIconImage == null) RefreshGoText(rightRemoveAllClothingBtn, "gallery.side.remove_clothing", "Remove\nClothing");
-            if (leftRemoveAllClothingBtnIconImage == null) RefreshGoText(leftRemoveAllClothingBtn, "gallery.side.remove_clothing", "Remove\nClothing");
+            if (rightRemoveAllClothingBtnIconImage == null) RefreshGoText(rightRemoveAllClothingBtn, "gallery.side.remove_clothing", "Unequip\nClothing");
+            if (leftRemoveAllClothingBtnIconImage == null) RefreshGoText(leftRemoveAllClothingBtn, "gallery.side.remove_clothing", "Unequip\nClothing");
+            if (rightRemoveAllHairBtnIconImage == null) RefreshGoText(rightRemoveAllHairBtn, "gallery.side.remove_hair", "Unequip\nHair");
+            if (leftRemoveAllHairBtnIconImage == null) RefreshGoText(leftRemoveAllHairBtn, "gallery.side.remove_hair", "Unequip\nHair");
 
             // Selection toolbox: Copy/Delete/Autoinstall/Hide/Unhide/No autoinstall — labels from selection (counts).
             try { RefreshTboxConditionalActionButtons(); } catch { }
@@ -174,14 +176,6 @@ namespace VPB
             RefreshGoText(tboxUnloadBtn, "gallery.tbox.unload", "Unload");
             RefreshGoText(tboxLoadDepsBtn, "gallery.tbox.load_deps", "Load Deps");
             RefreshGoText(tboxCacheTexturesBtn, "gallery.tbox.cache_textures", "Cache Textures");
-            if (tboxHintLabel != null)
-            {
-                int sel = (selectedFiles != null) ? selectedFiles.Count : 0;
-                if (sel == 0 && tboxPinned)
-                    tboxHintLabel.text = VPBTranslation.T("gallery.tbox.pinned_select", "Pinned — select items for actions");
-                else
-                    tboxHintLabel.text = VPBTranslation.T("gallery.tbox.hover_expand", "Hover to expand");
-            }
 
             // Undo / Redo labels include the stack count – delegate to the dedicated updater
             try { UpdateUndoRedoButtonLabels(); } catch { }
@@ -209,7 +203,6 @@ namespace VPB
             SyncRatingSortToggleState();
 
             try { RebuildLanguageMenuOptions(); } catch { }
-            try { RefreshFirstRunHintStrip(); } catch { }
             try { RefreshActiveFilterChips(); } catch { }
         }
 

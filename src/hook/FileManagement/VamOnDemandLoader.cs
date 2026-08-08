@@ -133,11 +133,206 @@ namespace VPB
                         null, new[] { typeof(string) }, null);
                 }
                 if (s_VamGetPackageMethod == null) return false;
-                object r = s_VamGetPackageMethod.Invoke(null, new object[] { uid });
-                return r != null;
+                // Skip Harmony GetPackage on-demand postfix — otherwise register probes recurse.
+                bool prev = s_InOnDemand;
+                s_InOnDemand = true;
+                try
+                {
+                    object r = s_VamGetPackageMethod.Invoke(null, new object[] { uid });
+                    return r != null;
+                }
+                finally { s_InOnDemand = prev; }
             }
             catch { }
             return false;
+        }
+
+        /// <summary>
+        /// Before clothing/hair UI Assist <c>SetActive*</c>: register scan-excluded package in native
+        /// FileManager. Optionally flush coalesced Refresh so <c>RefreshDynamicItems</c>
+        /// (onRefreshHandlers) rebuilds catalogs. Main thread only. No-op when scan whitelist off.
+        /// </summary>
+        /// <param name="allowCatalogForceRefresh">
+        /// True only when the item is missing from the person catalog (string-id miss).
+        /// Object-path SetActive already has the item — register files only, never Force Refresh.
+        /// False during <c>fromRestore</c> (preset path batches refresh via AtomHook).
+        /// </param>
+        public static void EnsurePackageReadyForDynamicItemActivation(
+            string packageUid,
+            string reason,
+            bool allowCatalogForceRefresh)
+        {
+            if (string.IsNullOrEmpty(packageUid)) return;
+            if (!ScanWhitelistManager.Instance.IsEnabled) return;
+            if (!IsMainThread()) return;
+
+            // Fast path: native already has package and clothing/hair catalog is fresh.
+            try
+            {
+                if (IsUidAlreadyRegisteredInVam(packageUid)
+                    && !IsPromotedPackageCatalogStale(packageUid))
+                    return;
+            }
+            catch { }
+
+            string od = null;
+            try { od = TryRegisterPackageOnDemand(packageUid); }
+            catch { }
+
+            if (!allowCatalogForceRefresh) return;
+            // Never nest Force Refresh inside an in-flight native Refresh (dictionary enum).
+            if (VamScanFilter.IsVamRefreshInProgress) return;
+
+            bool needCatalog = false;
+            try
+            {
+                if (!string.IsNullOrEmpty(od)
+                    && PackageRegistrationNeedsNativeCatalogRefresh(packageUid, null))
+                    needCatalog = true;
+                else if (IsPromotedPackageCatalogStale(packageUid))
+                    needCatalog = true;
+            }
+            catch { }
+
+            if (!needCatalog) return;
+
+            string r = string.IsNullOrEmpty(reason) ? "dynamic_item_activation" : reason;
+            try
+            {
+                if (!HasPendingCoalescedVamRefresh())
+                    RequestCoalescedVamRefresh(r);
+                ForceRunPendingCoalescedVamRefresh(r);
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// Resolve package UID from a dynamic-item id / backup path / packageUid field.
+        /// </summary>
+        public static string ResolvePackageUidForDynamicItem(string packageUid, string itemUid, string backupId)
+        {
+            if (!string.IsNullOrEmpty(packageUid)) return packageUid;
+            string fromUid = UidFromEntryPath(itemUid);
+            if (!string.IsNullOrEmpty(fromUid)) return fromUid;
+            return UidFromEntryPath(backupId);
+        }
+
+        /// <summary>
+        /// Nest-safe enter for Harmony on-demand postfixes. Returns false when already inside
+        /// an on-demand section (caller must not run heavy work / must not Exit).
+        /// </summary>
+        public static bool TryEnterOnDemandGuard(out bool previous)
+        {
+            previous = s_InOnDemand;
+            if (previous) return false;
+            s_InOnDemand = true;
+            return true;
+        }
+
+        public static void ExitOnDemandGuard(bool previous)
+        {
+            s_InOnDemand = previous;
+        }
+
+        /// <summary>
+        /// True while native Refresh is in flight, or before VaM's first Refresh has completed
+        /// (and World UI / READY not yet signaled). Heavy on-demand resolve/register must not run.
+        /// </summary>
+        public static bool ShouldDeferHeavyOnDemandProbe()
+        {
+            if (VamScanFilter.IsVamRefreshInProgress) return true;
+            if (!VamScanFilter.HasVamRefreshedAtLeastOnce && !SafeIsStartupReadyLogged()) return true;
+            return false;
+        }
+
+        /// <summary>
+        /// Queue a deliberate on-demand miss for later register — no disk walk.
+        /// Never used for Refresh-time GetPackage probe noise (that path must no-op).
+        /// </summary>
+        public static void EnqueueDeferredOnDemandFromProbe(string packageUidOrPath)
+        {
+            if (string.IsNullOrEmpty(packageUidOrPath)) return;
+            if (IsRawVarFilesystemPath(packageUidOrPath)) return;
+            if (!ScanWhitelistManager.Instance.IsEnabled) return;
+            // Refresh-time probes must not queue — see #12 hooks (log 22 register storm / crash).
+            if (VamScanFilter.IsVamRefreshInProgress) return;
+
+            EnqueueVamNotReadyDefer(packageUidOrPath, null);
+        }
+
+        private static string NormalizeOnDemandRequestUid(string uidOrPath)
+        {
+            if (string.IsNullOrEmpty(uidOrPath)) return null;
+            string s = uidOrPath.Trim();
+            if (s.Length == 0) return null;
+            if (s.StartsWith(UidOnlyPathPrefix, StringComparison.Ordinal))
+                s = s.Substring(UidOnlyPathPrefix.Length);
+            if (s.IndexOf(":/", StringComparison.Ordinal) >= 0)
+            {
+                string fromEntry = UidFromEntryPath(s);
+                if (!string.IsNullOrEmpty(fromEntry)) s = fromEntry;
+            }
+            if (s.EndsWith(".var", StringComparison.OrdinalIgnoreCase)
+                || s.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+            {
+                string fromPath = UidFromVarPath(s);
+                if (!string.IsNullOrEmpty(fromPath)) s = fromPath;
+            }
+            // Collapse Author.Pkg.latest.latest → Author.Pkg.latest (GetPackageGroup bug / double append).
+            const string latestSuffix = ".latest";
+            while (s.Length > latestSuffix.Length * 2
+                && s.EndsWith(".latest.latest", StringComparison.OrdinalIgnoreCase))
+            {
+                s = s.Substring(0, s.Length - latestSuffix.Length);
+            }
+            return s;
+        }
+
+        /// <summary>Returns true when this UID was newly queued.</summary>
+        private static bool EnqueueRefreshInProgressDefer(string uidOrPath)
+        {
+            string deferUid = NormalizeOnDemandRequestUid(uidOrPath);
+            if (string.IsNullOrEmpty(deferUid)) return false;
+            // Nonsense UIDs from probe bugs — never queue.
+            if (deferUid.EndsWith(".latest.latest", StringComparison.OrdinalIgnoreCase)) return false;
+            bool added;
+            lock (s_RefreshInProgressLock)
+            {
+                added = s_RefreshInProgressDeferredUids.Add(deferUid);
+                if (added)
+                    s_RefreshInProgressDeferredPaths.Enqueue(UidOnlyPathPrefix + deferUid);
+            }
+            // No per-UID log — Refresh can touch hundreds of legitimate entry-path defers;
+            // summary is logged on promote.
+            return added;
+        }
+
+        /// <summary>
+        /// Queue until first native Refresh completes and/or STARTUP READY.
+        /// <paramref name="varPathOrNull"/> may be null — then UID-only sentinel is stored (resolve later).
+        /// Returns true when newly queued.
+        /// </summary>
+        private static bool EnqueueVamNotReadyDefer(string uidOrPath, string varPathOrNull)
+        {
+            string deferUid = NormalizeOnDemandRequestUid(uidOrPath);
+            if (string.IsNullOrEmpty(deferUid)) return false;
+            bool added;
+            lock (s_VamNotReadyLock)
+            {
+                added = s_VamNotReadyDeferredUids.Add(deferUid);
+                if (added)
+                {
+                    if (!string.IsNullOrEmpty(varPathOrNull)
+                        && !varPathOrNull.StartsWith(UidOnlyPathPrefix, StringComparison.Ordinal)
+                        && varPathOrNull.IndexOf(":/", StringComparison.Ordinal) < 0)
+                        s_VamNotReadyDeferredPaths.Enqueue(varPathOrNull);
+                    else
+                        s_VamNotReadyDeferredPaths.Enqueue(UidOnlyPathPrefix + deferUid);
+                }
+            }
+            if (added)
+                Interlocked.Increment(ref s_StartupVamNotReadyDeferredCount);
+            return added;
         }
 
         private static readonly HashSet<string> s_RewriteLogOnceKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -391,7 +586,10 @@ namespace VPB
         [ThreadStatic]
         public static bool s_AllowRegistration;
 
-        // Set of UIDs we've already registered on-demand this session (avoid re-registering)
+        // Set of UIDs we've already registered on-demand this session (avoid re-registering).
+        // MUST be invalidated when native FileManager.Refresh completes under scan whitelist —
+        // VaM drops non-whitelisted packages, and stale entries here permanently skip re-register
+        // (Missing addon package spam until full VPB ClearCache). See issue #77.
         private static readonly HashSet<string> s_RegisteredOnDemand =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static readonly object s_RegisteredLock = new object();
@@ -432,7 +630,7 @@ namespace VPB
         private static readonly Queue<string> s_PendingPaths = new Queue<string>();
         private static readonly object s_QueueLock = new object();
         // Requests that arrive before VaM's first Refresh has completed.
-        // These are promoted once MarkVamRefreshed() fires.
+        // These are promoted once MarkVamRefreshed() fires (and again at STARTUP READY).
         private static readonly Queue<string> s_VamNotReadyDeferredPaths = new Queue<string>();
         private static readonly HashSet<string> s_VamNotReadyDeferredUids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static readonly object s_VamNotReadyLock = new object();
@@ -441,6 +639,12 @@ namespace VPB
         private static readonly Queue<string> s_RefreshInProgressDeferredPaths = new Queue<string>();
         private static readonly HashSet<string> s_RefreshInProgressDeferredUids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static readonly object s_RefreshInProgressLock = new object();
+        /// <summary>
+        /// Deferred queue entry when path is not resolved yet (avoid AddonPackages AllDirectories
+        /// walks during native Refresh / pre-ready). Drain/promote resolve to a real .var path.
+        /// </summary>
+        private const string UidOnlyPathPrefix = "uid:";
+        private static int s_UidOnlyResolveFailLogged;
         private static readonly object s_RefreshRequestLock = new object();
         private static bool s_PendingVamRefresh;
         private static float s_PendingVamRefreshRequestedAt;
@@ -450,7 +654,25 @@ namespace VPB
         // UIDs registered on-demand this session whose clothing/hair/morph catalogs may still be stale.
         private static readonly HashSet<string> s_CatalogStaleUids =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Morph packages registered while RefreshPackageMorphs was skipped (clothing/hair-only
+        // catalog refresh). Survives NotifyNativeCatalogRefreshed under skip guard — otherwise
+        // Appearance import sees newlyRegistered=0, skips refresh, and VaM logs missing morph UIDs.
+        private static readonly HashSet<string> s_MorphIngestPendingUids =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // UIDs that already had a successful EnsurePackageMorphsIngested / full morph refresh this
+        // session. Prevents re-paying RefreshPackageMorphs on every Appearance import.
+        private static readonly HashSet<string> s_MorphIngestCompletedUids =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static readonly object s_CatalogStaleLock = new object();
+        private const string MorphCatalogPathNeedle = "Custom/Atom/Person/Morphs/";
+        // DAZCharacterSelector.ResetMorphsToDefault(bool physical, bool appearance) — protected.
+        static MethodInfo s_ResetMorphsToDefaultMi;
+        static FieldInfo s_CharacterRunFi;
+        static MethodInfo s_SmoothApplyMorphsLiteMi;
+        static MethodInfo s_CharacterRunResetMorphsMi;
+        // physical=true, appearance=true — Appearance replace must clear pose morphs too
+        // (Yuna hand-straighten + Life breathing stick otherwise and poison later looks).
+        static readonly object[] s_ResetAllMorphArgs = new object[] { true, true };
 
         private const int MaxDrainPerFrame = 10;
         private const float CoalescedVamRefreshDelayStartupSeconds = 1.0f;
@@ -575,8 +797,18 @@ namespace VPB
                 s_RefreshInProgressDeferredPaths.Clear();
                 s_RefreshInProgressDeferredUids.Clear();
             }
+            lock (s_VamNotReadyLock)
+            {
+                s_VamNotReadyDeferredPaths.Clear();
+                s_VamNotReadyDeferredUids.Clear();
+            }
+            Interlocked.Exchange(ref s_UidOnlyResolveFailLogged, 0);
             lock (s_CatalogStaleLock)
+            {
                 s_CatalogStaleUids.Clear();
+                s_MorphIngestPendingUids.Clear();
+                s_MorphIngestCompletedUids.Clear();
+            }
         }
 
         /// <summary>True when UID was on-demand registered this session and native catalogs may still be stale.</summary>
@@ -587,16 +819,67 @@ namespace VPB
                 return s_CatalogStaleUids.Contains(uid);
         }
 
-        /// <summary>Called when native FileManager.Refresh completes — DAZ catalogs are fresh again.</summary>
+        /// <summary>
+        /// Called when native FileManager.Refresh completes — clothing/hair catalogs are fresh.
+        /// Morph-ingest pending clears only when RefreshPackageMorphs actually ran (skip guard off).
+        /// </summary>
         public static void NotifyNativeCatalogRefreshed()
         {
+            bool skipMorphs = VpbCatalogRefreshGuard.SkipPackageMorphRefresh;
             lock (s_CatalogStaleLock)
+            {
                 s_CatalogStaleUids.Clear();
+                if (!skipMorphs)
+                {
+                    // Full morph refresh ran with FM.Refresh — treat pending as completed.
+                    foreach (string uid in s_MorphIngestPendingUids)
+                    {
+                        if (!string.IsNullOrEmpty(uid))
+                            s_MorphIngestCompletedUids.Add(uid);
+                    }
+                    s_MorphIngestPendingUids.Clear();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Native Refresh rebuilds VaM's package set. Under scan whitelist, non-allowed packages are
+        /// dropped even if VPB previously registered them on-demand. Clear session skip/failure
+        /// caches so the next FileExists/GetVarFileEntry miss can re-register.
+        /// </summary>
+        private static void InvalidateOnDemandSessionCachesAfterNativeRefresh()
+        {
+            lock (s_RegisteredLock)
+                s_RegisteredOnDemand.Clear();
+            lock (s_FailedLock)
+                s_LastFailedAttemptTicksByUid.Clear();
+            // Keep s_MorphIngestCompletedUids across skip-morph clothing refreshes — clearing it
+            // would re-pay RefreshPackageMorphs after every dress. Re-register (MarkPromoted)
+            // removes the UID from completed when ingest is needed again.
+        }
+
+        /// <summary>
+        /// True when this UID was on-demand registered this session AND VaM still has it.
+        /// Clears stale tracking when native Refresh dropped the package (#77).
+        /// </summary>
+        private static bool ShouldSkipAlreadyRegisteredOnDemand(string uid)
+        {
+            if (string.IsNullOrEmpty(uid)) return false;
+            bool tracked;
+            lock (s_RegisteredLock)
+                tracked = s_RegisteredOnDemand.Contains(uid);
+            if (!tracked) return false;
+            if (IsUidAlreadyRegisteredInVam(uid)) return true;
+            lock (s_RegisteredLock)
+                s_RegisteredOnDemand.Remove(uid);
+            return false;
         }
 
         /// <summary>
         /// Whether a coalesced native refresh is needed after on-demand registration for these UIDs.
         /// Skips refresh when every UID was already registered and no catalog is stale.
+        /// Morph-ingest pending alone does not queue FileManager.Refresh — Appearance/Morphs import
+        /// calls <see cref="EnsurePackageMorphsIngested"/> (cheaper than a full native refresh).
         /// </summary>
         public static bool ShouldRequestCoalescedNativeRefreshForUids(ICollection<string> uids, int newlyRegisteredCount)
         {
@@ -625,60 +908,623 @@ namespace VPB
         static void MarkPromotedPackageCatalogStale(string uid)
         {
             if (string.IsNullOrEmpty(uid)) return;
+            CatalogContentKind kind = GetCatalogContentKindForUid(uid);
             lock (s_CatalogStaleLock)
+            {
                 s_CatalogStaleUids.Add(uid);
+                if ((kind & CatalogContentKind.Morphs) != 0)
+                {
+                    s_MorphIngestPendingUids.Add(uid);
+                    s_MorphIngestCompletedUids.Remove(uid);
+                }
+            }
+        }
+
+        [Flags]
+        enum CatalogContentKind
+        {
+            None = 0,
+            Clothing = 1,
+            Hair = 2,
+            Morphs = 4,
         }
 
         static bool IsCatalogDependentEntryPath(string entryPath)
         {
-            if (string.IsNullOrEmpty(entryPath)) return false;
-            string p = entryPath.Replace('\\', '/');
-            return p.IndexOf(":/Custom/Clothing/", StringComparison.OrdinalIgnoreCase) >= 0
-                || p.IndexOf(":/Custom/Hair/", StringComparison.OrdinalIgnoreCase) >= 0
-                || p.IndexOf(":/Custom/Atom/Person/Morphs/", StringComparison.OrdinalIgnoreCase) >= 0;
+            return GetCatalogContentKindForEntryPath(entryPath) != CatalogContentKind.None;
         }
 
-        static bool IsCatalogDependentUid(string uid)
+        static CatalogContentKind GetCatalogContentKindForEntryPath(string entryPath)
         {
-            if (string.IsNullOrEmpty(uid)) return false;
+            if (string.IsNullOrEmpty(entryPath)) return CatalogContentKind.None;
+            string p = entryPath.Replace('\\', '/');
+            CatalogContentKind kind = CatalogContentKind.None;
+            if (p.IndexOf(":/Custom/Clothing/", StringComparison.OrdinalIgnoreCase) >= 0)
+                kind |= CatalogContentKind.Clothing;
+            if (p.IndexOf(":/Custom/Hair/", StringComparison.OrdinalIgnoreCase) >= 0)
+                kind |= CatalogContentKind.Hair;
+            if (p.IndexOf(":/Custom/Atom/Person/Morphs/", StringComparison.OrdinalIgnoreCase) >= 0)
+                kind |= CatalogContentKind.Morphs;
+            return kind;
+        }
+
+        static CatalogContentKind ClassifyInternalPathCatalogKind(string internalPath)
+        {
+            if (string.IsNullOrEmpty(internalPath)) return CatalogContentKind.None;
+            // Manifest / zip names may use '\'; IndexOf so mid-path or odd prefixes still match.
+            string p = internalPath.Replace('\\', '/');
+            CatalogContentKind kind = CatalogContentKind.None;
+            if (p.StartsWith("Custom/Clothing/", StringComparison.OrdinalIgnoreCase)
+                || p.IndexOf("/Custom/Clothing/", StringComparison.OrdinalIgnoreCase) >= 0)
+                kind |= CatalogContentKind.Clothing;
+            if (p.StartsWith("Custom/Hair/", StringComparison.OrdinalIgnoreCase)
+                || p.IndexOf("/Custom/Hair/", StringComparison.OrdinalIgnoreCase) >= 0)
+                kind |= CatalogContentKind.Hair;
+            if (p.StartsWith("Custom/Atom/Person/Morphs/", StringComparison.OrdinalIgnoreCase)
+                || p.IndexOf("/Custom/Atom/Person/Morphs/", StringComparison.OrdinalIgnoreCase) >= 0
+                || p.IndexOf("Custom/Atom/Person/Morphs/", StringComparison.OrdinalIgnoreCase) >= 0)
+                kind |= CatalogContentKind.Morphs;
+            return kind;
+        }
+
+        static CatalogContentKind GetCatalogContentKindForUid(string uid)
+        {
+            if (string.IsNullOrEmpty(uid)) return CatalogContentKind.None;
             try
             {
                 SerializableVarPackage cached = VarPackageMgr.singleton.TryGetCache(uid);
                 if (cached != null && cached.FileEntryNames != null)
                 {
+                    CatalogContentKind kind = CatalogContentKind.None;
                     List<string> names = cached.FileEntryNames;
                     for (int i = 0; i < names.Count; i++)
-                    {
-                        string internalPath = names[i];
-                        if (string.IsNullOrEmpty(internalPath)) continue;
-                        if (internalPath.StartsWith("Custom/Clothing/", StringComparison.OrdinalIgnoreCase)) return true;
-                        if (internalPath.StartsWith("Custom/Hair/", StringComparison.OrdinalIgnoreCase)) return true;
-                        if (internalPath.StartsWith("Custom/Atom/Person/Morphs/", StringComparison.OrdinalIgnoreCase)) return true;
-                    }
-                    return false;
+                        kind |= ClassifyInternalPathCatalogKind(names[i]);
+                    return kind;
                 }
 
                 VarPackage pkg = FileManager.GetPackage(uid, false);
-                if (pkg == null) return true;
+                if (pkg == null)
+                {
+                    // Unknown package: treat as full catalog-dependent so we never skip morphs incorrectly.
+                    return CatalogContentKind.Clothing | CatalogContentKind.Hair | CatalogContentKind.Morphs;
+                }
 
                 List<string> manifestNames;
                 List<long> ticks;
                 List<long> sizes;
                 if (pkg.TryGetCachedFileEntryData(out manifestNames, out ticks, out sizes) && manifestNames != null)
                 {
+                    CatalogContentKind kind = CatalogContentKind.None;
                     for (int i = 0; i < manifestNames.Count; i++)
-                    {
-                        string internalPath = manifestNames[i];
-                        if (string.IsNullOrEmpty(internalPath)) continue;
-                        if (internalPath.StartsWith("Custom/Clothing/", StringComparison.OrdinalIgnoreCase)) return true;
-                        if (internalPath.StartsWith("Custom/Hair/", StringComparison.OrdinalIgnoreCase)) return true;
-                        if (internalPath.StartsWith("Custom/Atom/Person/Morphs/", StringComparison.OrdinalIgnoreCase)) return true;
-                    }
-                    return false;
+                        kind |= ClassifyInternalPathCatalogKind(manifestNames[i]);
+                    return kind;
                 }
             }
             catch { }
+            return CatalogContentKind.Clothing | CatalogContentKind.Hair | CatalogContentKind.Morphs;
+        }
+
+        static bool IsCatalogDependentUid(string uid)
+        {
+            return GetCatalogContentKindForUid(uid) != CatalogContentKind.None;
+        }
+
+        /// <summary>True when any morph package still needs DAZ bank ingest.</summary>
+        public static bool HasPendingMorphIngest()
+        {
+            lock (s_CatalogStaleLock)
+                return s_MorphIngestPendingUids.Count > 0;
+        }
+
+        /// <summary>
+        /// Slice JSON references morph package paths: mark those package UIDs for bank ingest.
+        /// Only UIDs that appear in morph path refs are marked — not every dep that happens to
+        /// contain a Morphs/ folder (Yuna's 113-dep closure was marking 34 packages and forcing a
+        /// full ClearPackageMorphs rebuild that poisoned later looks).
+        /// </summary>
+        public static void NoteMorphIngestPendingForSlice(ICollection<string> uids, string sliceJson)
+        {
+            if (!JsonReferencesPackageMorphContent(sliceJson)) return;
+
+            int marked = 0;
+            lock (s_CatalogStaleLock)
+            {
+                marked += NoteMorphPackageUidsFromJsonUnlocked(sliceJson);
+            }
+
+            if (marked > 0)
+            {
+                try
+                {
+                    int depCount = uids != null ? uids.Count : 0;
+                    LogUtil.Log("[VPB OnDemand] NoteMorphIngestPendingForSlice marked=" + marked
+                        + " deps=" + depCount);
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// Walk slice/preset JSON for <c>uid:/Custom/Atom/Person/Morphs/</c> and mark those package UIDs.
+        /// Caller must hold <see cref="s_CatalogStaleLock"/>. Warm path — import only.
+        /// </summary>
+        static int NoteMorphPackageUidsFromJsonUnlocked(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return 0;
+            const string needle = ":/Custom/Atom/Person/Morphs/";
+            int marked = 0;
+            int searchFrom = 0;
+            while (searchFrom < json.Length)
+            {
+                int idx = json.IndexOf(needle, searchFrom, StringComparison.OrdinalIgnoreCase);
+                if (idx < 0) break;
+
+                int end = idx;
+                int start = end - 1;
+                while (start >= 0)
+                {
+                    char c = json[start];
+                    if (c == '"' || c == '\'' || c == '[' || c == ',' || c == '{' || c == ':'
+                        || c == ' ' || c == '\t' || c == '\r' || c == '\n')
+                    {
+                        start++;
+                        break;
+                    }
+                    start--;
+                }
+                if (start < 0) start = 0;
+
+                if (end > start)
+                {
+                    string uid = json.Substring(start, end - start);
+                    if (!string.IsNullOrEmpty(uid)
+                        && !string.Equals(uid, "SELF", StringComparison.OrdinalIgnoreCase)
+                        && !s_MorphIngestCompletedUids.Contains(uid)
+                        && s_MorphIngestPendingUids.Add(uid))
+                    {
+                        marked++;
+                    }
+                }
+
+                searchFrom = idx + needle.Length;
+            }
+            return marked;
+        }
+
+        /// <summary>True when any of the given UIDs still needs morph-bank ingest.</summary>
+        public static bool HasMorphIngestPendingForUids(ICollection<string> uids)
+        {
+            if (uids == null || uids.Count == 0) return false;
+            lock (s_CatalogStaleLock)
+            {
+                if (s_MorphIngestPendingUids.Count == 0) return false;
+                foreach (string uid in uids)
+                {
+                    if (string.IsNullOrEmpty(uid)) continue;
+                    if (s_MorphIngestPendingUids.Contains(uid)) return true;
+                }
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// True when JSON text references package morph paths (warm gate; no alloc).
+        /// </summary>
+        public static bool JsonReferencesPackageMorphContent(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return false;
+            return json.IndexOf(MorphCatalogPathNeedle, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        /// <summary>
+        /// True when any pending catalog-stale UID carries morph content, or morph ingest is still pending
+        /// after a clothing/hair-only skip refresh.
+        /// Clothing/hair-only stale sets must not re-run RefreshPackageMorphs (Naturalis cost).
+        /// </summary>
+        public static bool PendingCatalogNeedsMorphRefresh()
+        {
+            lock (s_CatalogStaleLock)
+            {
+                if (s_MorphIngestPendingUids.Count > 0) return true;
+                if (s_CatalogStaleUids.Count == 0) return false;
+                foreach (string uid in s_CatalogStaleUids)
+                {
+                    if ((GetCatalogContentKindForUid(uid) & CatalogContentKind.Morphs) != 0)
+                        return true;
+                }
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Skip package-morph re-ingest when enabled and pending stale UIDs are clothing/hair-only.
+        /// Empty stale set → do not skip (unknown refresh intent; keep morph refresh).
+        /// Morph-ingest-pending alone does not block skip — Appearance/Morphs import calls
+        /// <see cref="EnsurePackageMorphsIngested"/> so clothing dress keeps the Naturalis saving.
+        /// </summary>
+        public static bool ShouldSkipPackageMorphRefreshForCatalogUpdate()
+        {
+            try
+            {
+                if (Settings.Instance == null
+                    || Settings.Instance.SkipPackageMorphRefreshOnClothingHairCatalog == null
+                    || !Settings.Instance.SkipPackageMorphRefreshOnClothingHairCatalog.Value)
+                    return false;
+            }
+            catch { return false; }
+
+            lock (s_CatalogStaleLock)
+            {
+                if (s_CatalogStaleUids.Count == 0) return false;
+                foreach (string uid in s_CatalogStaleUids)
+                {
+                    if ((GetCatalogContentKindForUid(uid) & CatalogContentKind.Morphs) != 0)
+                        return false;
+                }
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Zero ALL morph values (appearance + pose) on a Person before package-morph bank rebuild
+        /// or Appearance replace apply.
+        /// VaM <c>RefreshPackageMorphs</c> snapshots morphValue != startValue, ClearPackageMorphs,
+        /// reimports, then restores — previous look values bleed across imports.
+        /// Yuna-style character morphs also drive bones via formulas and ship pose morphs at 1
+        /// (hand straighten); appearance-only reset left those active and corrupted later looks.
+        /// Forces <c>morphValue = 0</c> (not <c>Reset()</c>/defaultVal) then flushes characterRun.
+        /// Warm path — import only.
+        /// </summary>
+        public static void ResetAppearanceMorphValues(Atom targetAtom, string reason = null)
+        {
+            if (!IsMainThread()) return;
+            if (targetAtom == null || !string.Equals(targetAtom.type, "Person", StringComparison.Ordinal))
+                return;
+
+            try
+            {
+                var selector = targetAtom.GetStorableByID("geometry") as DAZCharacterSelector;
+                if (selector == null) return;
+
+                // Force zero on every morph in the UI lists (includes demand-activated).
+                ZeroMorphList(selector.morphsControlUI);
+                ZeroMorphList(selector.morphsControlUIAlt);
+                ZeroMorphList(selector.morphsControlUIOtherGender);
+
+                if (s_ResetMorphsToDefaultMi == null)
+                {
+                    s_ResetMorphsToDefaultMi = typeof(DAZCharacterSelector).GetMethod(
+                        "ResetMorphsToDefault",
+                        BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public,
+                        null,
+                        new Type[] { typeof(bool), typeof(bool) },
+                        null);
+                }
+                if (s_ResetMorphsToDefaultMi != null)
+                    s_ResetMorphsToDefaultMi.Invoke(selector, s_ResetAllMorphArgs);
+                else
+                    selector.ResetMorphsOtherGender(true, true);
+
+                // Flush bone formulas (Yuna Body targets carpals/neck/hip) so zeroed values take effect.
+                FlushCharacterRunMorphs(selector);
+
+                try
+                {
+                    LogUtil.Log("[VPB OnDemand] ResetAppearanceMorphValues"
+                        + (string.IsNullOrEmpty(reason) ? "" : (" reason=" + reason))
+                        + " atom=" + targetAtom.uid);
+                }
+                catch { }
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    LogUtil.LogWarning("[VPB OnDemand] ResetAppearanceMorphValues failed: " + ex.Message
+                        + (string.IsNullOrEmpty(reason) ? "" : (" reason=" + reason)));
+                }
+                catch { }
+            }
+        }
+
+        static void ZeroMorphList(GenerateDAZMorphsControlUI ui)
+        {
+            if (ui == null) return;
+            List<DAZMorph> morphs = ui.GetMorphs();
+            if (morphs == null) return;
+            for (int i = 0; i < morphs.Count; i++)
+            {
+                DAZMorph m = morphs[i];
+                if (m == null) continue;
+                try { m.morphValue = 0f; }
+                catch
+                {
+                    try { m.Reset(); } catch { }
+                }
+            }
+        }
+
+        static void FlushCharacterRunMorphs(DAZCharacterSelector selector)
+        {
+            if (selector == null) return;
+            try
+            {
+                if (s_CharacterRunFi == null)
+                    s_CharacterRunFi = typeof(DAZCharacterSelector).GetField(
+                        "_characterRun", BindingFlags.Instance | BindingFlags.NonPublic);
+                object run = s_CharacterRunFi != null ? s_CharacterRunFi.GetValue(selector) : null;
+                if (run == null) return;
+
+                if (s_CharacterRunResetMorphsMi == null)
+                    s_CharacterRunResetMorphsMi = run.GetType().GetMethod(
+                        "ResetMorphs", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                        null, Type.EmptyTypes, null);
+                if (s_CharacterRunResetMorphsMi != null)
+                    s_CharacterRunResetMorphsMi.Invoke(run, null);
+
+                if (s_SmoothApplyMorphsLiteMi == null)
+                    s_SmoothApplyMorphsLiteMi = run.GetType().GetMethod(
+                        "SmoothApplyMorphsLite", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                        null, Type.EmptyTypes, null);
+                if (s_SmoothApplyMorphsLiteMi != null)
+                    s_SmoothApplyMorphsLiteMi.Invoke(run, null);
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// After Appearance replace: unload inactive demand-activated package morphs (e.g. Yuna Body/Head)
+        /// so they cannot linger in banks and re-corrupt later looks.
+        /// </summary>
+        public static void UnloadInactiveDemandMorphs(Atom targetAtom, string reason = null)
+        {
+            if (!IsMainThread()) return;
+            if (targetAtom == null || !string.Equals(targetAtom.type, "Person", StringComparison.Ordinal))
+                return;
+            try
+            {
+                var selector = targetAtom.GetStorableByID("geometry") as DAZCharacterSelector;
+                if (selector == null) return;
+                selector.UnloadDemandActivatedMorphs();
+                selector.CleanDemandActivatedMorphs();
+                try
+                {
+                    LogUtil.Log("[VPB OnDemand] UnloadInactiveDemandMorphs"
+                        + (string.IsNullOrEmpty(reason) ? "" : (" reason=" + reason))
+                        + " atom=" + targetAtom.uid);
+                }
+                catch { }
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    LogUtil.LogWarning("[VPB OnDemand] UnloadInactiveDemandMorphs failed: " + ex.Message);
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// Re-ingest package morphs into DAZ banks so Appearance/Morphs apply can resolve UIDs.
+        /// Target-only when known (import); all Persons when null (plugin dep path).
+        /// Clears morph-ingest pending after a successful call (VaM no-ops when unchanged).
+        /// Main thread only. Warm path — not per-frame.
+        /// </summary>
+        public static bool EnsurePackageMorphsIngested(Atom targetAtom, string reason = null)
+        {
+            if (!IsMainThread()) return false;
+            if (VpbCatalogRefreshGuard.SkipPackageMorphRefresh)
+            {
+                try
+                {
+                    LogUtil.LogWarning("[VPB OnDemand] EnsurePackageMorphsIngested skipped (skip guard active)"
+                        + (string.IsNullOrEmpty(reason) ? "" : (" reason=" + reason)));
+                }
+                catch { }
+                return false;
+            }
+
+            bool hadPending;
+            int pendingCount;
+            lock (s_CatalogStaleLock)
+            {
+                pendingCount = s_MorphIngestPendingUids.Count;
+                hadPending = pendingCount > 0;
+            }
+
+            // Clear previous look values before bank rebuild — otherwise RefreshPackageMorphs
+            // snapshots+restores them and they survive the next Appearance replace.
+            // Import reasons only: plugin_dep ingest must not wipe live appearance morphs.
+            bool resetForImport = !string.IsNullOrEmpty(reason)
+                && (reason.IndexOf("vpb_import", StringComparison.OrdinalIgnoreCase) >= 0
+                    || reason.IndexOf("VpbImport", StringComparison.OrdinalIgnoreCase) >= 0);
+            if (resetForImport && targetAtom != null)
+                ResetAppearanceMorphValues(targetAtom, "pre_ingest:" + reason);
+
+            bool changed = false;
+            try
+            {
+                if (targetAtom != null && string.Equals(targetAtom.type, "Person", StringComparison.Ordinal))
+                {
+                    changed = RefreshPackageMorphsOnAtom(targetAtom);
+                }
+                else
+                {
+                    var sc = SuperController.singleton;
+                    if (sc != null)
+                    {
+                        foreach (Atom atom in sc.GetAtoms())
+                        {
+                            if (atom == null || atom.type != "Person") continue;
+                            if (RefreshPackageMorphsOnAtom(atom)) changed = true;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    LogUtil.LogWarning("[VPB OnDemand] EnsurePackageMorphsIngested failed: " + ex.Message
+                        + (string.IsNullOrEmpty(reason) ? "" : (" reason=" + reason)));
+                }
+                catch { }
+                return false;
+            }
+
+            lock (s_CatalogStaleLock)
+            {
+                foreach (string uid in s_MorphIngestPendingUids)
+                {
+                    if (!string.IsNullOrEmpty(uid))
+                        s_MorphIngestCompletedUids.Add(uid);
+                }
+                s_MorphIngestPendingUids.Clear();
+            }
+
+            try
+            {
+                LogUtil.Log("[VPB OnDemand] EnsurePackageMorphsIngested changed=" + (changed ? 1 : 0)
+                    + " pendingWas=" + pendingCount
+                    + " hadPending=" + (hadPending ? 1 : 0)
+                    + (string.IsNullOrEmpty(reason) ? "" : (" reason=" + reason))
+                    + (targetAtom != null ? (" atom=" + targetAtom.uid) : " atom=all"));
+            }
+            catch { }
+
+            return changed;
+        }
+
+        /// <summary>
+        /// Warm gate: run morph ingest only when morph packages still need bank ingest.
+        /// When <paramref name="jsonOrNull"/> names package morph paths, mark those UIDs pending first
+        /// (fixes clothing/hair-only ForceRun skip + incomplete manifest classification).
+        /// </summary>
+        public static bool EnsurePackageMorphsIngestedIfNeeded(Atom targetAtom, string jsonOrNull, string reason = null)
+        {
+            if (!string.IsNullOrEmpty(jsonOrNull))
+                NoteMorphIngestPendingForSlice(null, jsonOrNull);
+            if (!HasPendingMorphIngest())
+                return false;
+            return EnsurePackageMorphsIngested(targetAtom, reason);
+        }
+
+        static bool RefreshPackageMorphsOnAtom(Atom atom)
+        {
+            if (atom == null) return false;
+            var selector = atom.GetStorableByID("geometry") as DAZCharacterSelector;
+            if (selector == null) return false;
+            return selector.RefreshPackageMorphs();
+        }
+
+        /// <summary>Drop coalesced native refresh without running it (light clothing catalog path succeeded).</summary>
+        public static bool CancelPendingCoalescedVamRefresh(string reason = null)
+        {
+            lock (s_RefreshRequestLock)
+            {
+                if (!s_PendingVamRefresh) return false;
+                s_PendingVamRefresh = false;
+                s_PendingVamRefreshRequestedAt = 0f;
+                s_PendingVamRefreshFirstRequestedAt = 0f;
+                s_PendingVamRefreshRequestCount = 0;
+                s_PendingVamRefreshReason = null;
+            }
+            try
+            {
+                LogUtil.Log("[VPB OnDemand] Cancelled pending FileManager.Refresh"
+                    + (string.IsNullOrEmpty(reason) ? "" : (" reason=" + reason)));
+            }
+            catch { }
             return true;
+        }
+
+        /// <summary>
+        /// Rebuild clothing/hair item lists on Person atoms without full FileManager.Refresh.
+        /// Prefer target atom when known; otherwise all Persons.
+        /// </summary>
+        public static void RefreshPersonClothingHairCatalogs(Atom targetAtom)
+        {
+            try
+            {
+                if (targetAtom != null && string.Equals(targetAtom.type, "Person", StringComparison.Ordinal))
+                {
+                    RefreshOnePersonClothingHairCatalog(targetAtom);
+                    return;
+                }
+
+                var sc = SuperController.singleton;
+                if (sc == null) return;
+                foreach (Atom atom in sc.GetAtoms())
+                {
+                    if (atom == null || atom.type != "Person") continue;
+                    RefreshOnePersonClothingHairCatalog(atom);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogWarning("[VPB OnDemand] RefreshPersonClothingHairCatalogs failed: " + ex.Message);
+            }
+        }
+
+        static void RefreshOnePersonClothingHairCatalog(Atom atom)
+        {
+            if (atom == null) return;
+            try
+            {
+                var clothing = atom.GetStorableByID("Clothing") as DAZClothingItemControl;
+                if (clothing != null) clothing.RefreshClothingItems();
+            }
+            catch { }
+            try
+            {
+                var hair = atom.GetStorableByID("Hair") as DAZHairGroupControl;
+                if (hair != null) hair.RefreshHairItems();
+            }
+            catch { }
+            try
+            {
+                var selector = atom.GetStorableByID("geometry") as DAZCharacterSelector;
+                if (selector != null) selector.RefreshDynamicClothes();
+            }
+            catch { }
+        }
+
+        /// <summary>Public entry for delayed MVR refresh coroutine (same morph-skip policy).</summary>
+        public static void InvokeNativeFileManagerRefreshForDelayedMvr(string reason)
+        {
+            InvokeNativeFileManagerRefresh("Running delayed FileManager.Refresh", reason);
+        }
+
+        static void InvokeNativeFileManagerRefresh(string logLabel, string reason)
+        {
+            bool skipMorphs = ShouldSkipPackageMorphRefreshForCatalogUpdate();
+            Action run = delegate
+            {
+                PausePhysicsForCatalogRefresh();
+                MVR.FileManagement.FileManager.Refresh();
+            };
+
+            if (skipMorphs)
+            {
+                try
+                {
+                    LogUtil.Log("[VPB OnDemand] " + logLabel + " (skipPackageMorphs=1 reason="
+                        + (string.IsNullOrEmpty(reason) ? "unknown" : reason) + ")");
+                }
+                catch { }
+                VpbCatalogRefreshGuard.RunSkippingPackageMorphRefresh(run);
+            }
+            else
+            {
+                try
+                {
+                    LogUtil.Log("[VPB OnDemand] " + logLabel + " (skipPackageMorphs=0 reason="
+                        + (string.IsNullOrEmpty(reason) ? "unknown" : reason) + ")");
+                }
+                catch { }
+                run();
+            }
         }
 
         /// <summary>
@@ -708,11 +1554,13 @@ namespace VPB
             if (!VamScanFilter.HasRegisterMethodAccess) return null;
             if (!persistUidOverride && IsRawVarFilesystemPath(uid)) return null;
 
-            // Already registered this session?
-            lock (s_RegisteredLock)
-            {
-                if (s_RegisteredOnDemand.Contains(uid)) return null;
-            }
+            string normalized = NormalizeOnDemandRequestUid(uid);
+            if (!string.IsNullOrEmpty(normalized))
+                uid = normalized;
+
+            // Already registered this session — but only skip if VaM still has the package.
+            // Native Refresh under scan whitelist can drop it while this set still contains the UID.
+            if (ShouldSkipAlreadyRegisteredOnDemand(uid)) return null;
 
             // Cooldown repeated failures per UID to prevent startup stalls from repeated reflection/invoke exceptions.
             if (WasRecentFailure(uid))
@@ -722,31 +1570,51 @@ namespace VPB
                 return null;
             }
 
-            if (!TryResolveVarPathForUid(uid, out string resolvedUid, out string varPath))
+            // --- Defer BEFORE expensive path resolve (AllDirectories / .latest FS walk) ---
+            // #12 GetPackage/IsPackage hooks + dep probes during native Refresh were paying
+            // recursive AddonPackages walks per miss, then only queueing — multi-minute Init hang.
+            if (VamScanFilter.IsVamRefreshInProgress)
             {
-                // Genuinely unresolvable: arm the failure cooldown so repeated probes for the same uid
-                // short-circuit instead of re-running the recursive AddonPackages walk on every hook call.
-                MarkFailure(uid);
+                EnqueueRefreshInProgressDefer(uid);
                 return null;
             }
-            if (string.IsNullOrEmpty(varPath)) return null;
-
-            string deferUidCheck = !string.IsNullOrEmpty(resolvedUid) ? resolvedUid : uid;
-            string deferPathCheck = deferUidCheck + ":/";
-            if (ShouldDeferStartupOnDemandForPath(deferPathCheck, deferUidCheck))
+            if (!VamScanFilter.HasVamRefreshedAtLeastOnce && !SafeIsStartupReadyLogged())
             {
-                lock (s_VamNotReadyLock)
+                if (EnqueueVamNotReadyDefer(uid, null))
                 {
-                    if (s_VamNotReadyDeferredUids.Add(deferUidCheck))
-                        s_VamNotReadyDeferredPaths.Enqueue(varPath);
+                    string deferUidEarly = NormalizeOnDemandRequestUid(uid);
+                    if (!string.IsNullOrEmpty(deferUidEarly))
+                        LogUtil.Log("[VPB OnDemand] Defer before VaM FileManager ready: " + deferUidEarly);
                 }
                 return null;
             }
 
-            lock (s_RegisteredLock)
+            // Non-script / heavy-script policy until READY — queue UID only (resolve on promote).
             {
-                if (!string.IsNullOrEmpty(resolvedUid) && s_RegisteredOnDemand.Contains(resolvedUid)) return null;
+                string deferUidPolicy = NormalizeOnDemandRequestUid(uid);
+                if (!string.IsNullOrEmpty(deferUidPolicy)
+                    && ShouldDeferStartupOnDemandForPath(deferUidPolicy + ":/", deferUidPolicy))
+                {
+                    EnqueueVamNotReadyDefer(deferUidPolicy, null);
+                    return null;
+                }
             }
+
+            if (!TryResolveVarPathForUid(uid, out string resolvedUid, out string varPath))
+            {
+                // Do not poison during native Refresh / pre-ready windows — resolve can fail transiently
+                // while VaM dictionaries rebuild or VPB inventory is mid-scan.
+                if (!VamScanFilter.IsVamRefreshInProgress && VamScanFilter.HasVamRefreshedAtLeastOnce)
+                {
+                    // Genuinely unresolvable: arm the failure cooldown so repeated probes for the same uid
+                    // short-circuit instead of re-running the recursive AddonPackages walk on every hook call.
+                    MarkFailure(uid);
+                }
+                return null;
+            }
+            if (string.IsNullOrEmpty(varPath)) return null;
+
+            if (!string.IsNullOrEmpty(resolvedUid) && ShouldSkipAlreadyRegisteredOnDemand(resolvedUid)) return null;
             if (!string.IsNullOrEmpty(resolvedUid) && WasRecentFailure(resolvedUid)) return null;
 
             // Check file exists
@@ -795,16 +1663,9 @@ namespace VPB
             // them once VamScanFilter.MarkVamRefreshed() signals readiness.
             if (!VamScanFilter.HasVamRefreshedAtLeastOnce && !SafeIsStartupReadyLogged())
             {
-                bool added;
-                string deferUid = !string.IsNullOrEmpty(resolvedUid) ? resolvedUid : uid;
-                lock (s_VamNotReadyLock)
-                {
-                    added = s_VamNotReadyDeferredUids.Add(deferUid);
-                    if (added)
-                        s_VamNotReadyDeferredPaths.Enqueue(varPath);
-                }
-                if (added)
-                    Interlocked.Increment(ref s_StartupVamNotReadyDeferredCount);
+                EnqueueVamNotReadyDefer(
+                    !string.IsNullOrEmpty(resolvedUid) ? resolvedUid : uid,
+                    varPath);
                 return null;
             }
 
@@ -820,6 +1681,8 @@ namespace VPB
                     if (added)
                         s_RefreshInProgressDeferredPaths.Enqueue(varPath);
                 }
+                if (added)
+                    LogUtil.Log("[VPB OnDemand] Defer during VaM Refresh: " + deferUid);
                 return null;
             }
 
@@ -1068,23 +1931,7 @@ namespace VPB
         /// </summary>
         public static void NotifyVamFileManagerRefreshed()
         {
-            int promoted = 0;
-            lock (s_VamNotReadyLock)
-            {
-                while (s_VamNotReadyDeferredPaths.Count > 0)
-                {
-                    string path = s_VamNotReadyDeferredPaths.Dequeue();
-                    if (string.IsNullOrEmpty(path)) continue;
-                    lock (s_QueueLock)
-                        s_PendingPaths.Enqueue(path);
-                    promoted++;
-                }
-                s_VamNotReadyDeferredUids.Clear();
-            }
-
-            if (promoted > 0)
-                LogUtil.Log("[VPB OnDemand] VaM FileManager ready - promoted " + promoted + " deferred registrations");
-                try { VamStartupProfiler.Milestone("VamOnDemand.FileManager_ready promoted=" + promoted); } catch { }
+            PromoteVamNotReadyDeferred("FileManager_ready");
         }
 
         /// <summary>
@@ -1093,24 +1940,91 @@ namespace VPB
         /// </summary>
         public static void NotifyVamRefreshCompleted()
         {
-            int promoted = 0;
-            lock (s_RefreshInProgressLock)
-            {
-                while (s_RefreshInProgressDeferredPaths.Count > 0)
-                {
-                    string path = s_RefreshInProgressDeferredPaths.Dequeue();
-                    if (string.IsNullOrEmpty(path)) continue;
-                    lock (s_QueueLock)
-                        s_PendingPaths.Enqueue(path);
-                    promoted++;
-                }
-                s_RefreshInProgressDeferredUids.Clear();
-            }
+            int promoted = PromoteDeferredQueueToPending(
+                s_RefreshInProgressLock,
+                s_RefreshInProgressDeferredPaths,
+                s_RefreshInProgressDeferredUids,
+                "refresh_completed");
 
             if (promoted > 0)
                 LogUtil.Log("[VPB OnDemand] VaM refresh completed - promoted " + promoted + " deferred registrations");
 
+            // Drop session skip caches before catalog-stale clear so the next miss can re-register
+            // packages that native Refresh just excluded under the scan whitelist (#77).
+            InvalidateOnDemandSessionCachesAfterNativeRefresh();
             NotifyNativeCatalogRefreshed();
+        }
+
+        private static void PromoteVamNotReadyDeferred(string reason)
+        {
+            int promoted = PromoteDeferredQueueToPending(
+                s_VamNotReadyLock,
+                s_VamNotReadyDeferredPaths,
+                s_VamNotReadyDeferredUids,
+                reason);
+            if (promoted > 0)
+            {
+                LogUtil.Log("[VPB OnDemand] VaM FileManager ready - promoted " + promoted
+                    + " deferred registrations (" + reason + ")");
+                try { VamStartupProfiler.Milestone("VamOnDemand.FileManager_ready promoted=" + promoted + " reason=" + reason); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// Move deferred path/uid-sentinel entries onto <see cref="s_PendingPaths"/>.
+        /// UID-only sentinels stay as sentinels — <see cref="DrainMainThreadQueue"/> resolves them
+        /// when VPB inventory / SQL is warmer (avoids resolve spikes on Refresh postfix).
+        /// </summary>
+        private static int PromoteDeferredQueueToPending(
+            object lockObj,
+            Queue<string> paths,
+            HashSet<string> uids,
+            string reason)
+        {
+            int promoted = 0;
+            lock (lockObj)
+            {
+                while (paths.Count > 0)
+                {
+                    string entry = paths.Dequeue();
+                    if (string.IsNullOrEmpty(entry)) continue;
+                    lock (s_QueueLock)
+                        s_PendingPaths.Enqueue(entry);
+                    promoted++;
+                }
+                uids.Clear();
+            }
+            return promoted;
+        }
+
+        /// <summary>
+        /// Resolve a pending/deferred queue entry to uid + .var path.
+        /// Supports real paths and <see cref="UidOnlyPathPrefix"/> sentinels.
+        /// </summary>
+        private static bool TryResolveQueueEntry(string entry, out string uid, out string varPath)
+        {
+            uid = null;
+            varPath = null;
+            if (string.IsNullOrEmpty(entry)) return false;
+
+            if (entry.StartsWith(UidOnlyPathPrefix, StringComparison.Ordinal))
+            {
+                string req = entry.Substring(UidOnlyPathPrefix.Length);
+                if (string.IsNullOrEmpty(req)) return false;
+                if (!TryResolveVarPathForUid(req, out uid, out varPath))
+                {
+                    int n = Interlocked.Increment(ref s_UidOnlyResolveFailLogged);
+                    if (n <= 8)
+                        LogUtil.LogWarning("[VPB OnDemand] Deferred UID resolve failed: " + req);
+                    return false;
+                }
+                return !string.IsNullOrEmpty(varPath);
+            }
+
+            uid = UidFromVarPath(entry);
+            varPath = NormalizePath(entry);
+            if (string.IsNullOrEmpty(uid)) uid = NormalizeOnDemandRequestUid(entry);
+            return !string.IsNullOrEmpty(varPath);
         }
 
         private static void RegisterNow(string uid, string varPath)
@@ -1207,9 +2121,15 @@ namespace VPB
                 VarPackage vpbPkg = FileManager.GetPackage(requestUid, ensureInstalled: false);
                 if (vpbPkg != null && !string.IsNullOrEmpty(vpbPkg.Path))
                 {
-                    resolvedUid = !string.IsNullOrEmpty(vpbPkg.Uid) ? vpbPkg.Uid : UidFromVarPath(vpbPkg.Path);
-                    varPath = NormalizePath(vpbPkg.Path);
-                    if (!string.IsNullOrEmpty(resolvedUid) && !string.IsNullOrEmpty(varPath)) return true;
+                    string livePath = NormalizePath(vpbPkg.Path);
+                    // Registry can lag after package moves; require file on disk before trusting path.
+                    if ((File.Exists(livePath) || File.Exists(vpbPkg.Path))
+                        && !string.IsNullOrEmpty(livePath))
+                    {
+                        resolvedUid = !string.IsNullOrEmpty(vpbPkg.Uid) ? vpbPkg.Uid : UidFromVarPath(vpbPkg.Path);
+                        varPath = livePath;
+                        if (!string.IsNullOrEmpty(resolvedUid)) return true;
+                    }
                 }
             }
             catch { }
@@ -1283,6 +2203,11 @@ namespace VPB
             string bestUid = null;
 
             // Final fallback: scan filesystem for the newest installed version.
+            // Skip during native Refresh / pre-ready — recursive *.var walks stall Init (#12).
+            if (VamScanFilter.IsVamRefreshInProgress
+                || (!VamScanFilter.HasVamRefreshedAtLeastOnce && !SafeIsStartupReadyLogged()))
+                return null;
+
             bestVersion = -1;
             bestUid = null;
             foreach (string root in new[] { "AddonPackages", "AllPackages" })
@@ -1314,11 +2239,17 @@ namespace VPB
         {
             if (string.IsNullOrEmpty(uid)) return null;
 
-            // Prefer indexed UID->path lookup when available.
+            // Prefer indexed UID->path lookup when available — but never trust a stale path after
+            // AddonPackages moves (e.g. deps relocated under Dep/). Missing file must fall through
+            // to recursive find; otherwise on-demand register never sees the live .var (#77 follow-up).
             try
             {
                 if (VpbLocalDatabase.TryResolveIndexedVarPathForUid(uid, out string sqlPath) && !string.IsNullOrEmpty(sqlPath))
-                    return NormalizePath(sqlPath);
+                {
+                    string normSql = NormalizePath(sqlPath);
+                    if (File.Exists(normSql) || (!string.Equals(normSql, sqlPath, StringComparison.Ordinal) && File.Exists(sqlPath)))
+                        return normSql;
+                }
             }
             catch { }
 
@@ -1327,6 +2258,11 @@ namespace VPB
             if (File.Exists(addon)) return addon;
             string all = NormalizePath(Path.Combine("AllPackages", filename));
             if (File.Exists(all)) return all;
+
+            // Recursive walk is expensive on large libraries — never during Refresh / pre-ready.
+            if (VamScanFilter.IsVamRefreshInProgress
+                || (!VamScanFilter.HasVamRefreshedAtLeastOnce && !SafeIsStartupReadyLogged()))
+                return null;
 
             foreach (string root in new[] { "AddonPackages", "AllPackages" })
             {
@@ -1370,22 +2306,43 @@ namespace VPB
             MaybeLogStartupSummary();
             if (VamScanFilter.IsVamRefreshInProgress) return;
 
+            // Non-script requests deferred after first Refresh but before READY were stuck in
+            // s_VamNotReady* (NotifyVamFileManagerRefreshed only runs once). Flush at READY.
+            if (SafeIsStartupReadyLogged())
+            {
+                bool hasLeftover;
+                lock (s_VamNotReadyLock)
+                    hasLeftover = s_VamNotReadyDeferredPaths.Count > 0;
+                if (hasLeftover)
+                    PromoteVamNotReadyDeferred("startup_ready");
+            }
+
             int drained = 0;
             while (drained < MaxDrainPerFrame)
             {
-                string path;
+                string entry;
                 lock (s_QueueLock)
                 {
                     if (s_PendingPaths.Count == 0) break;
-                    path = s_PendingPaths.Dequeue();
+                    entry = s_PendingPaths.Dequeue();
                 }
 
-                if (!string.IsNullOrEmpty(path))
+                if (!string.IsNullOrEmpty(entry))
                 {
-                    // Derive UID from path
-                    string uid = UidFromVarPath(path);
-                    if (!string.IsNullOrEmpty(uid))
-                        RegisterNow(uid, path);
+                    string uid;
+                    string path;
+                    if (TryResolveQueueEntry(entry, out uid, out path))
+                    {
+                        if (!string.IsNullOrEmpty(uid))
+                            RegisterNow(uid, path);
+                    }
+                    else if (entry.StartsWith(UidOnlyPathPrefix, StringComparison.Ordinal))
+                    {
+                        // Unresolvable now (missing .var / index lag). Arm cooldown; do not spin.
+                        string req = entry.Substring(UidOnlyPathPrefix.Length);
+                        if (!string.IsNullOrEmpty(req))
+                            MarkFailure(req);
+                    }
                 }
                 drained++;
             }
@@ -1497,10 +2454,7 @@ namespace VPB
 
             try
             {
-                LogUtil.Log("[VPB OnDemand] Running immediate FileManager.Refresh (reason="
-                    + (string.IsNullOrEmpty(reason) ? "immediate" : reason) + ")");
-                PausePhysicsForCatalogRefresh();
-                MVR.FileManagement.FileManager.Refresh();
+                InvokeNativeFileManagerRefresh("Running immediate FileManager.Refresh", reason);
             }
             catch (Exception ex)
             {
@@ -1574,10 +2528,9 @@ namespace VPB
 
             try
             {
-                LogUtil.Log("[VPB OnDemand] Running coalesced FileManager.Refresh (requests="
-                    + requestCount + ", reason=" + (string.IsNullOrEmpty(reason) ? "unknown" : reason) + ")");
-                PausePhysicsForCatalogRefresh();
-                MVR.FileManagement.FileManager.Refresh();
+                InvokeNativeFileManagerRefresh(
+                    "Running coalesced FileManager.Refresh requests=" + requestCount,
+                    reason);
             }
             catch (Exception ex)
             {
@@ -1589,6 +2542,70 @@ namespace VPB
         {
             lock (s_RefreshRequestLock)
                 return s_PendingVamRefresh;
+        }
+
+        /// <summary>Warm-path probe string: pending refresh + why morph-skip is on/off.</summary>
+        public static string DescribePendingCatalogRefreshForProbe()
+        {
+            int pendingCount = 0;
+            string pendingReason = null;
+            bool pending;
+            lock (s_RefreshRequestLock)
+            {
+                pending = s_PendingVamRefresh;
+                pendingCount = s_PendingVamRefreshRequestCount;
+                pendingReason = s_PendingVamRefreshReason;
+            }
+
+            bool skipMorphs = false;
+            int staleCount = 0;
+            int morphStale = 0;
+            int morphIngestPending = 0;
+            string morphSample = "";
+            try
+            {
+                skipMorphs = ShouldSkipPackageMorphRefreshForCatalogUpdate();
+                lock (s_CatalogStaleLock)
+                {
+                    staleCount = s_CatalogStaleUids.Count;
+                    morphIngestPending = s_MorphIngestPendingUids.Count;
+                    int shown = 0;
+                    foreach (string uid in s_CatalogStaleUids)
+                    {
+                        if ((GetCatalogContentKindForUid(uid) & CatalogContentKind.Morphs) != 0)
+                        {
+                            morphStale++;
+                            if (shown < 4)
+                            {
+                                if (shown > 0) morphSample += ",";
+                                morphSample += uid;
+                                shown++;
+                            }
+                        }
+                    }
+                    if (shown < 4)
+                    {
+                        foreach (string uid in s_MorphIngestPendingUids)
+                        {
+                            if (string.IsNullOrEmpty(uid)) continue;
+                            if (shown > 0) morphSample += ",";
+                            morphSample += uid;
+                            shown++;
+                            if (shown >= 4) break;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            return "pending=" + (pending ? 1 : 0)
+                + " reqs=" + pendingCount
+                + " reason=" + (pendingReason ?? "-")
+                + " skipMorphs=" + (skipMorphs ? 1 : 0)
+                + " stale=" + staleCount
+                + " morphStale=" + morphStale
+                + " morphIngestPending=" + morphIngestPending
+                + " morphSample=" + (string.IsNullOrEmpty(morphSample) ? "-" : morphSample);
         }
 
         /// <summary>
@@ -1614,10 +2631,9 @@ namespace VPB
 
             try
             {
-                LogUtil.Log("[VPB OnDemand] Running forced FileManager.Refresh (pending_requests="
-                    + requestCount + ", reason=" + (string.IsNullOrEmpty(reason) ? "forced" : reason) + ")");
-                PausePhysicsForCatalogRefresh();
-                MVR.FileManagement.FileManager.Refresh();
+                InvokeNativeFileManagerRefresh(
+                    "Running forced FileManager.Refresh pending_requests=" + requestCount,
+                    reason);
             }
             catch (Exception ex)
             {

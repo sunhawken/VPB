@@ -209,7 +209,9 @@ namespace VPB
                 + "|" + CurrentPathsSignatureFragment()
                 + "|" + (int)(st != null ? st.Type : 0)
                 + "|" + (int)(st != null ? st.Direction : 0)
-                + "|" + scale.ToString("R");
+                + "|" + scale.ToString("R")
+                + "|crR" + CreatorRatingRevisionFragment()
+                + "|crF" + (creatorRatedOnlyFilter ? "1" : "0");
         }
 
         private void EnsureCreatorVirtScrollHook(bool isLeft, GameObject holder)
@@ -376,7 +378,8 @@ namespace VPB
         {
             if (btnGO == null) return;
             string cName = creator.Name ?? "";
-            bool isActive = CreatorFilterContains(cName);
+            // Selection highlight — not CreatorFilterContains (that is true for everyone when filter empty).
+            bool isActive = ActiveFilterContainsCreatorSelection(cName);
             Color btnColor = isActive ? ColorCreator : ColorInactiveRow;
             string label = cName + " (" + creator.Count + ")";
 
@@ -386,6 +389,7 @@ namespace VPB
                 btnComp.onClick.RemoveAllListeners();
                 btnComp.onClick.AddListener(() =>
                 {
+                    CreatorRatingRowHandler.CloseAnyOpen();
                     ToggleCreatorFilter(cName);
                     OnCreatorFilterChanged(refreshFilesAndTabs: true);
                 });
@@ -394,6 +398,7 @@ namespace VPB
             if (rightClickDelegate == null) rightClickDelegate = btnGO.AddComponent<UIRightClickDelegate>();
             rightClickDelegate.OnRightClick = () =>
             {
+                CreatorRatingRowHandler.CloseAnyOpen();
                 SaveCurrentCategoryFilterState(currentCategoryTitle, currentPath);
                 ClearCreatorFilters();
                 OnCreatorFilterChanged(refreshFilesAndTabs: true);
@@ -403,7 +408,9 @@ namespace VPB
             if (img != null) img.color = btnColor;
 
             float s = ChromeScale;
-            Text txt = btnGO.GetComponentInChildren<Text>();
+            Text txt = null;
+            Transform textTr = btnGO.transform.Find("Text");
+            if (textTr != null) txt = textTr.GetComponent<Text>();
             if (txt != null)
             {
                 txt.text = label;
@@ -417,6 +424,8 @@ namespace VPB
             le.minHeight = SideTabRowHeightPx(s);
             le.preferredHeight = SideTabRowHeightPx(s);
             le.flexibleWidth = 1;
+
+            BindCreatorRatingChrome(btnGO, cName);
         }
 
         /// <summary>
@@ -1116,7 +1125,7 @@ namespace VPB
         {
             SortState st = GetSortState("Creator");
             float scale = ChromeScale;
-            return creatorSideTabDataRevision + CreatorConsolidationSignatureFragment() + "|" + (creatorFilter ?? "") + "|" + CurrentPathsSignatureFragment() + "|" + (currentExtension ?? "") + "|" + (currentCreator ?? "") + "|" + (int)st.Type + "|" + (int)st.Direction + "|" + scale.ToString("R");
+            return creatorSideTabDataRevision + CreatorConsolidationSignatureFragment() + "|" + (creatorFilter ?? "") + "|" + CurrentPathsSignatureFragment() + "|" + (currentExtension ?? "") + "|" + (currentCreator ?? "") + "|" + (int)st.Type + "|" + (int)st.Direction + "|" + scale.ToString("R") + "|crR" + CreatorRatingRevisionFragment() + "|crF" + (creatorRatedOnlyFilter ? "1" : "0");
         }
 
 
@@ -1327,8 +1336,15 @@ namespace VPB
                 _rightUserTagVirtScroll = null;
                 _rightUserTagVirtHooked = false;
             }
-            _userTagVirtView.Clear();
-            _userTagVirtViewSig = null;
+            // Shared virt view — only wipe when neither rail still owns User Tags pick list.
+            bool otherStillOpen = isLeft
+                ? (rightActiveContent == ContentType.UserTags && rightTabContainerGO != null)
+                : (leftActiveContent == ContentType.UserTags && leftTabContainerGO != null);
+            if (!otherStillOpen)
+            {
+                _userTagVirtView.Clear();
+                _userTagVirtViewSig = null;
+            }
         }
 
         private static void DestroyChildIfPresent(Transform container, string childName)
@@ -1602,7 +1618,7 @@ namespace VPB
             rt.offsetMax = new Vector2(-pad, -pad);
         }
 
-        private InputField CreateSearchInput(GameObject parent, float width, UnityAction<string> onValueChanged, Action onClear = null, Action onEscape = null)
+        internal InputField CreateSearchInput(GameObject parent, float width, UnityAction<string> onValueChanged, Action onClear = null, Action onEscape = null)
         {
             GameObject inputGO = new GameObject("SearchInput");
             inputGO.transform.SetParent(parent.transform, false);
@@ -2082,7 +2098,7 @@ namespace VPB
             ratingRT.sizeDelta = new Vector2(40, 40);
             ratingRT.anchoredPosition = new Vector2(-2, -2);
 
-            GameObject starBtnGO = UI.CreateUIButton(ratingGO, 32, 32, "★", 20, 0, 0, AnchorPresets.middleCenter, null);
+            GameObject starBtnGO = UI.CreateUIButton(ratingGO, 32, 32, "0", 20, 0, 0, AnchorPresets.middleCenter, null);
             starBtnGO.name = "Star";
             starBtnGO.GetComponent<Button>().navigation = new Navigation { mode = Navigation.Mode.None };
             Text starIconText = starBtnGO.GetComponentInChildren<Text>();
@@ -2737,7 +2753,7 @@ namespace VPB
         {
             int badgeFont = UiMetrics.FontBody();
             digitFont = Mathf.Max(badgeFont + 2, Mathf.RoundToInt(badgeFont * 1.15f));
-            // Square chrome hugs digit/★ — old letterBadge*1.3 left empty band above/below glyph.
+            // Square chrome hugs colored digit — old letterBadge*1.3 left empty band above/below glyph.
             ratingBadge = Mathf.Max(24f, digitFont + 6f);
             edge = Mathf.Max(4f, Mathf.Round(ratingBadge * 0.15f));
         }
@@ -2750,7 +2766,7 @@ namespace VPB
             AddTooltipPlain(badgeGO, tip);
         }
 
-        /// <summary>Grid hover: show top-right rating star for quick rate. Other badges stay on detail strip.</summary>
+        /// <summary>Grid hover: show top-right colored rating digit for quick rate. Other badges stay on detail strip.</summary>
         internal void ShowGridHoverBadges(GameObject btnGO, FileEntry file)
         {
             if (btnGO == null || file == null) return;
@@ -2842,6 +2858,7 @@ namespace VPB
                 if (rh != null)
                 {
                     rh.panel = this;
+                    // Digit+color always — same pattern as list / creator ratings.
                     rh.SetShowDigitMode(true);
                     // Don't close if picker already open (re-enter / tooltip child hops).
                     if (!rh.IsSelectorOpen)
@@ -2860,7 +2877,7 @@ namespace VPB
             _gridHoverBadgeBtnGO = btnGO;
         }
 
-        /// <summary>Grid hover exit / recycle: deactivate rating star on this cell. No-op outside grid.</summary>
+        /// <summary>Grid hover exit / recycle: deactivate rating badge on this cell. No-op outside grid.</summary>
         /// <param name="force">Recycle/disable must force-close even if rating picker is open.</param>
         internal void HideGridHoverBadges(GameObject btnGO, bool force = false)
         {
@@ -2875,10 +2892,7 @@ namespace VPB
             try
             {
                 if (rh != null)
-                {
                     rh.CloseSelector();
-                    rh.SetShowDigitMode(false);
-                }
             }
             catch { }
 
@@ -3151,11 +3165,25 @@ namespace VPB
             Button btn = rb0;
             if (btn != null) btn.onClick.RemoveAllListeners();
 
-            bool isListMode = (layoutMode == GalleryLayoutMode.List);
+            bool isListMode = layoutMode == GalleryLayoutMode.List || settingsListViewActive;
             bool isSettingsRow = file is InternalSettingRowEntry;
 
             if (isSettingsRow)
             {
+                // Stale settings row after exit handoff — do not paint settings chrome into grid tiles.
+                if (!settingsListViewActive && !IsSettingsPanelOpen())
+                {
+                    FileButtonBinder.SetActive(b != null ? b.listRowTr : null, false);
+                    FileButtonBinder.SetActive(b != null ? b.gridLabelTr : null, false);
+                    FileButtonBinder.SetActive(b != null ? b.thumbTr : null, false);
+                    if (btn != null)
+                    {
+                        btn.onClick.RemoveAllListeners();
+                        btn.interactable = false;
+                    }
+                    return;
+                }
+
                 // Special settings list-row mode: no package affordances (thumb/rating/badges/meta columns).
                 Transform listRowTrSpecial = b != null ? b.listRowTr : btnGO.transform.Find("ListRow");
                 if (listRowTrSpecial != null)
@@ -3783,9 +3811,10 @@ namespace VPB
                 RatingHandler rh = b != null ? b.ratingHandler : btnGO.GetComponent<RatingHandler>();
                 if (rh != null && selector2Tr != null && starText != null)
                 {
+                    rh.panel = this;
                     rh.Init(file, starText, selector2Tr.gameObject);
-                    // Recycled grid-hover cells may leave digit mode on — list/bind always use ★.
-                    rh.SetShowDigitMode(false);
+                    // Colored digit always (list + grid) — never color-only ★.
+                    rh.SetShowDigitMode(true);
                 }
             }
 

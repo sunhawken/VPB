@@ -12,6 +12,8 @@ namespace VPB
         public Action<PointerEventData> OnPointerEnterEvent;
         // Detach slot for the latest tooltip closure; re-binds use it to avoid stacking on the multicast delegate.
         public Action<bool> TooltipHandler;
+        // Same for PointerEnter sample capture — AddTooltip* rebinds must not stack lambdas.
+        public Action<PointerEventData> TooltipPointerEnterHandler;
         private bool isHovered = false;
         public bool IsHovered { get { return isHovered; } }
 
@@ -101,6 +103,54 @@ namespace VPB
                 OnRightClick?.Invoke();
             else if (eventData.button == PointerEventData.InputButton.Middle)
                 OnMiddleClick?.Invoke();
+        }
+    }
+
+    /// <summary>
+    /// Left-click on this graphic. Skips when the raycast hit is under a named child
+    /// (nested action chips) so parent rows do not steal chip clicks.
+    /// </summary>
+    public class UILeftClickDelegate : MonoBehaviour, IPointerClickHandler
+    {
+        public Action OnLeftClick;
+        /// <summary>Child transform names that own the click (RandomBtn, MoreBtn, …).</summary>
+        public string[] SkipWhenUnderChildNames;
+
+        public void OnPointerClick(PointerEventData eventData)
+        {
+            if (eventData == null || eventData.button != PointerEventData.InputButton.Left)
+                return;
+            if (OnLeftClick == null) return;
+            if (IsUnderSkippedChild(eventData))
+                return;
+            OnLeftClick.Invoke();
+        }
+
+        private bool IsUnderSkippedChild(PointerEventData eventData)
+        {
+            if (SkipWhenUnderChildNames == null || SkipWhenUnderChildNames.Length == 0)
+                return false;
+            GameObject hit = null;
+            try { hit = eventData.pointerCurrentRaycast.gameObject; } catch { }
+            if (hit == null)
+            {
+                try { hit = eventData.pointerPressRaycast.gameObject; } catch { }
+            }
+            if (hit == null) return false;
+
+            Transform t = hit.transform;
+            Transform self = transform;
+            while (t != null && t != self)
+            {
+                string n = t.name;
+                for (int i = 0; i < SkipWhenUnderChildNames.Length; i++)
+                {
+                    if (n == SkipWhenUnderChildNames[i])
+                        return true;
+                }
+                t = t.parent;
+            }
+            return false;
         }
     }
 
@@ -257,12 +307,23 @@ namespace VPB
         private Image[] optionImages;
         private Text[] optionTexts;
         private GameObject[] borderGOs;
-        /// <summary>Grid hover: show 0–5 digit instead of colored ★ glyph.</summary>
-        private bool showDigitInsteadOfStar;
         /// <summary>Host panel — grid picker reparents under background to escape ScrollRect mask.</summary>
         public GalleryPanel panel;
         private Transform _selectorHomeParent;
         private int _selectorHomeSibling;
+
+        /// <summary>Star Image watermark when digit is primary (toolbox / optional icon).</summary>
+        private static readonly Color StarIconWatermark = new Color(1f, 1f, 1f, 0.18f);
+        /// <summary>Unrated digit on dark chrome (grid ghost α=0.2 is too faint on toolbox).</summary>
+        private static readonly Color ChromeUnratedDigit = new Color(0.88f, 0.88f, 0.90f, 0.95f);
+        /// <summary>How far button fill leans toward rating hue (digit stays primary signal).</summary>
+        private const float ChromeBackdropMix = 0.30f;
+        /// <summary>Toolbox ★ glyph — affordance only; digit carries status color.</summary>
+        private static readonly Color ChromeStarAffordance = new Color(1f, 1f, 1f, 0.92f);
+
+        /// <summary>Toolbox chrome: full-α digit + light backdrop tint. Grid badges keep ghost-0.</summary>
+        private bool statusChrome;
+        private Image chromeButtonImage;
 
         public static readonly Color[] RatingColors = new Color[]
         {
@@ -414,6 +475,16 @@ namespace VPB
             else RatingsManager.Instance.SetRating(uid, rating);
             UpdateDisplay();
             SetSelectorVisible(false);
+            try
+            {
+                if (panel != null)
+                {
+                    if (entry != null) panel.AfterItemRatingsMutated(entry);
+                    else if (!string.IsNullOrEmpty(uid)) panel.AfterItemRatingsMutatedByUid(uid);
+                    else panel.AfterItemRatingsMutated();
+                }
+            }
+            catch { }
         }
 
         public void SetOptionRefs(Image[] images, Text[] texts, GameObject[] borders)
@@ -430,41 +501,76 @@ namespace VPB
             UpdateDisplay();
         }
 
+        /// <summary>
+        /// Toolbox status chip: full-α digit color + light backdrop tint; ★ stays white affordance
+        /// (side-by-side layout). Grid cell badges leave this off (ghost unrated stays intentional).
+        /// </summary>
+        public void SetStatusChrome(bool enabled, Image buttonImage = null)
+        {
+            statusChrome = enabled;
+            if (buttonImage != null) chromeButtonImage = buttonImage;
+            UpdateDisplay();
+        }
+
         public void SetDisplayOnly(int rating)
         {
             currentRating = Mathf.Clamp(rating, 0, 5);
             UpdateDisplay();
         }
 
-        /// <summary>Grid hover badges: digit label. List mode keeps colored ★.</summary>
+        /// <summary>
+        /// Legacy no-op — ratings always show colored 0–5 digit (never color-only ★).
+        /// Kept so call sites compile; digit mode is the only display.
+        /// </summary>
         public void SetShowDigitMode(bool digit)
         {
-            if (showDigitInsteadOfStar == digit) return;
-            showDigitInsteadOfStar = digit;
             UpdateDisplay();
         }
 
         public int CurrentRating => currentRating;
 
+        private Color ResolveDigitColor(int rating)
+        {
+            Color c = RatingColors[rating];
+            if (!statusChrome) return c;
+            if (rating == 0) return ChromeUnratedDigit;
+            c.a = 1f;
+            return c;
+        }
+
         private void UpdateDisplay()
         {
-            Color c = RatingColors[Mathf.Clamp(currentRating, 0, 5)];
+            int rating = Mathf.Clamp(currentRating, 0, 5);
+            Color c = ResolveDigitColor(rating);
             if (starIconText != null)
             {
-                if (showDigitInsteadOfStar)
-                    starIconText.text = currentRating.ToString();
-                else
-                    starIconText.text = "★";
-                // Digit and ★ both use rating color scale.
+                // Digit + rainbow color = meaning; never ★ alone.
+                if (!starIconText.gameObject.activeSelf)
+                    starIconText.gameObject.SetActive(true);
+                starIconText.text = currentRating.ToString();
                 starIconText.color = c;
+                starIconText.raycastTarget = false;
+                // Grid badge: digit on top of star. Toolbox chrome lays out ★|digit — skip sibling shuffle.
+                if (!statusChrome)
+                    starIconText.transform.SetAsLastSibling();
             }
             if (starIconImage != null)
-                starIconImage.color = c;
+            {
+                starIconImage.color = statusChrome ? ChromeStarAffordance : StarIconWatermark;
+                starIconImage.raycastTarget = false;
+            }
+            if (statusChrome && chromeButtonImage != null)
+            {
+                Color bg = UI.IconButtonBackdrop;
+                if (rating > 0)
+                    bg = Color.Lerp(bg, RatingColors[rating], ChromeBackdropMix);
+                chromeButtonImage.color = bg;
+            }
 
             if (optionImages == null) return;
             for (int i = 0; i < optionImages.Length && i < 6; i++)
             {
-                bool selected = (i == currentRating);
+                bool selected = (i == rating);
                 if (optionImages[i] != null)
                     optionImages[i].color = RatingColors[i];
                 if (optionTexts != null && i < optionTexts.Length && optionTexts[i] != null)
@@ -645,55 +751,19 @@ namespace VPB
     }
 
     /// <summary>
-    /// Thumb preview input: left double-click + right-hold tracking for wheel rating.
+    /// Thumb preview: left double-click → apply/launch.
     /// Does not implement <see cref="IScrollHandler"/> (unlike EventTrigger), so wheel reaches
-    /// <see cref="UIScrollWheelHandler"/> on the same hierarchy.
+    /// <see cref="UIScrollWheelHandler"/> on the same hierarchy. Rating stays on star clicks.
     /// </summary>
-    public sealed class DetailStripThumbClickRelay : MonoBehaviour,
-        IPointerClickHandler, IPointerDownHandler, IPointerUpHandler, IPointerExitHandler
+    public sealed class DetailStripThumbClickRelay : MonoBehaviour, IPointerClickHandler
     {
         public Action OnDoubleClick;
-        public Action<bool> OnRightHoldChanged;
-
-        public bool RightHeld { get; private set; }
 
         public void OnPointerClick(PointerEventData eventData)
         {
             if (eventData == null || eventData.button != PointerEventData.InputButton.Left) return;
             if (eventData.clickCount < 2) return;
             try { OnDoubleClick?.Invoke(); } catch { }
-        }
-
-        public void OnPointerDown(PointerEventData eventData)
-        {
-            if (eventData == null || eventData.button != PointerEventData.InputButton.Right) return;
-            SetRightHeld(true);
-        }
-
-        public void OnPointerUp(PointerEventData eventData)
-        {
-            if (eventData == null || eventData.button != PointerEventData.InputButton.Right) return;
-            SetRightHeld(false);
-        }
-
-        public void OnPointerExit(PointerEventData eventData)
-        {
-            // Keep hold if RMB still down (wheel can jitter exit); clear when released.
-            if (!RightHeld) return;
-            if (!Input.GetMouseButton(1))
-                SetRightHeld(false);
-        }
-
-        private void OnDisable()
-        {
-            SetRightHeld(false);
-        }
-
-        private void SetRightHeld(bool held)
-        {
-            if (RightHeld == held) return;
-            RightHeld = held;
-            try { OnRightHoldChanged?.Invoke(held); } catch { }
         }
     }
 

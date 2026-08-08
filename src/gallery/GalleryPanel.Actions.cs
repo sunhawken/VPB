@@ -12,6 +12,21 @@ namespace VPB
 {
     public partial class GalleryPanel
     {
+        static string InferPersonPresetTypeFromPath(string pathNormLower)
+        {
+            if (string.IsNullOrEmpty(pathNormLower)) return "unknown";
+            if (pathNormLower.Contains("/appearance/")) return "Appearance";
+            if (pathNormLower.Contains("/breastphysics/")) return "BreastPhysics";
+            if (pathNormLower.Contains("/glutephysics/")) return "GlutePhysics";
+            if (pathNormLower.Contains("/skin/")) return "Skin";
+            if (pathNormLower.Contains("/morphs/")) return "Morphs";
+            if (pathNormLower.Contains("/pose/")) return "Pose";
+            if (pathNormLower.Contains("/hair/")) return "Hair";
+            if (pathNormLower.Contains("/clothing/")) return "Clothing";
+            if (pathNormLower.Contains("/subscene/")) return "SubScene";
+            return "other";
+        }
+
         private void EnsureCanvasRegisteredWithSuperController()
         {
             if (_registeredWithSuperController) return;
@@ -114,16 +129,74 @@ namespace VPB
                         catch { return false; }
                     }
 
-                    if (pathLower.Contains("/clothing/") || pathLower.Contains("\\clothing\\") || category.Contains("Clothing"))
+                    // If Appearance category but entry is BreastPhysics/Skin/etc sibling, remap to look .vap.
+                    FileEntry remapped = VPB.src.util.AppearanceApplyProbe.TryRemapToAppearanceSibling(file, category);
+                    if (remapped != null)
+                    {
+                        file = remapped;
+                        dragger.FileEntry = remapped;
+                        pathLower = (file.Path ?? "").ToLowerInvariant();
+                    }
+
+                    // Path-first person presets. Category must not swallow Pose/BreastPhysics/etc.
+                    // (log: Appearance tab → Pose path → pose overwrite; Skin tab → BreastPhysics → LoadSkin).
+                    string pathNorm = pathLower.Replace('\\', '/');
+                    bool pathAppearance = pathNorm.Contains("/appearance/");
+                    bool pathPose = pathNorm.Contains("/pose/") || pathNorm.Contains("saves/person/pose");
+                    bool pathSkin = pathNorm.Contains("/skin/");
+                    bool pathBreast = pathNorm.Contains("/breastphysics/");
+                    bool pathGlute = pathNorm.Contains("/glutephysics/");
+                    bool pathMorphs = pathNorm.Contains("/morphs/");
+                    bool pathHair = pathNorm.Contains("/hair/");
+                    bool pathClothing = pathNorm.Contains("/clothing/");
+
+                    string itemTypeName = InferPersonPresetTypeFromPath(pathNorm);
+                    bool catPersonPreset =
+                        category.IndexOf("Appearance", StringComparison.OrdinalIgnoreCase) >= 0
+                        || category.IndexOf("Skin", StringComparison.OrdinalIgnoreCase) >= 0
+                        || category.IndexOf("Morphs", StringComparison.OrdinalIgnoreCase) >= 0
+                        || category.IndexOf("Pose", StringComparison.OrdinalIgnoreCase) >= 0
+                        || category.IndexOf("Clothing", StringComparison.OrdinalIgnoreCase) >= 0
+                        || category.IndexOf("Hair", StringComparison.OrdinalIgnoreCase) >= 0;
+                    bool pathSubScene = pathLower.Contains("/subscene/") || pathLower.Contains("\\subscene\\");
+                    bool catSubScene = category.IndexOf("SubScene", StringComparison.OrdinalIgnoreCase) >= 0;
+
+                    if (pathClothing || (!pathAppearance && !pathPose && !pathSkin && !pathBreast && !pathGlute && !pathMorphs && !pathHair && category.Contains("Clothing")))
                     {
                         Atom target = GetBestTargetAtom();
+                        AppearanceApplyProbe.Route(category, file.Path, itemTypeName, "LoadClothing",
+                            pathAppearance, pathPose, pathSkin, pathBreast, pathGlute, pathMorphs, pathHair, pathClothing,
+                            target != null ? target.uid : null);
                         if (target == null) { LogUtil.LogWarning("[VPB] Please select a Person atom."); return false; }
                         dragger.LoadClothing(target);
                         return true;
                     }
 
-                    if (pathLower.Contains("/subscene/") || pathLower.Contains("\\subscene\\") || category.Contains("SubScene"))
+                    // SubScene path must not run under Appearance/Skin/etc — log proved crash:
+                    // Appearance click → show_Dae SubScene → Replace wiped Anjbgo → RemoveAtom .SELECTIONS hang.
+                    if (pathSubScene || catSubScene)
                     {
+                        if (catPersonPreset && !catSubScene)
+                        {
+                            AppearanceApplyProbe.Route(category, file.Path, itemTypeName, "BLOCKED_SubScene_in_person_cat",
+                                pathAppearance, pathPose, pathSkin, pathBreast, pathGlute, pathMorphs, pathHair, pathClothing, null);
+                            AppearanceApplyProbe.Warn(
+                                "Blocked SubScene load while category='" + category
+                                + "'. Switch to SubScene tab (Replace wipe of scene SubScenes crashes/hangs). path="
+                                + (file.Path ?? ""));
+                            try
+                            {
+                                ShowTemporaryStatus(
+                                    VPBTranslation.T("gallery.status.subscene_wrong_category",
+                                        "That file is a SubScene — open SubScene category (Replace can wipe scene)."),
+                                    4f);
+                            }
+                            catch { }
+                            return false;
+                        }
+
+                        AppearanceApplyProbe.Route(category, file.Path, itemTypeName, "LoadSubScene",
+                            pathAppearance, pathPose, pathSkin, pathBreast, pathGlute, pathMorphs, pathHair, pathClothing, null);
                         dragger.LoadSubScene(file.Uid);
                         return true;
                     }
@@ -131,55 +204,114 @@ namespace VPB
                     bool isScene = pathLower.EndsWith(".json") && (pathLower.Contains("/scene/") || pathLower.Contains("\\scene\\") || pathLower.Contains("saves/scene") || category.Contains("Scene"));
                     if (isScene)
                     {
+                        VPB.src.util.AppearanceApplyProbe.Route(category, file.Path, itemTypeName, "LoadSceneFile",
+                            pathAppearance, pathPose, pathSkin, pathBreast, pathGlute, pathMorphs, pathHair, pathClothing, null);
                         dragger.LoadSceneFile(file.Uid);
                         return true;
                     }
 
-                    if (pathLower.Contains("/hair/") || pathLower.Contains("\\hair\\") || category.Contains("Hair"))
+                    if (pathHair || (!pathAppearance && !pathPose && !pathSkin && category.Contains("Hair")))
                     {
                         Atom target = GetBestTargetAtom();
+                        VPB.src.util.AppearanceApplyProbe.Route(category, file.Path, itemTypeName, "LoadHair",
+                            pathAppearance, pathPose, pathSkin, pathBreast, pathGlute, pathMorphs, pathHair, pathClothing,
+                            target != null ? target.uid : null);
                         if (target == null) { LogUtil.LogWarning("[VPB] Please select a Person atom."); return false; }
                         dragger.LoadHair(target);
                         return true;
                     }
 
-                    if (pathLower.Contains("/skin/") || pathLower.Contains("\\skin\\") || category.Contains("Skin"))
+                    if (pathSkin)
                     {
                         Atom target = GetBestTargetAtom();
+                        VPB.src.util.AppearanceApplyProbe.Route(category, file.Path, itemTypeName, "LoadSkin",
+                            pathAppearance, pathPose, pathSkin, pathBreast, pathGlute, pathMorphs, pathHair, pathClothing,
+                            target != null ? target.uid : null);
                         if (target == null) { LogUtil.LogWarning("[VPB] Please select a Person atom."); return false; }
                         dragger.LoadSkin(target);
                         return true;
                     }
 
-                    if (pathLower.Contains("/morphs/") || pathLower.Contains("\\morphs\\") || category.Contains("Morphs"))
+                    if (pathBreast || pathGlute)
                     {
                         Atom target = GetBestTargetAtom();
+                        VPB.src.util.AppearanceApplyProbe.Route(category, file.Path, itemTypeName, "LoadSkin(breast/glute)",
+                            pathAppearance, pathPose, pathSkin, pathBreast, pathGlute, pathMorphs, pathHair, pathClothing,
+                            target != null ? target.uid : null);
+                        if (target == null) { LogUtil.LogWarning("[VPB] Please select a Person atom."); return false; }
+                        // ApplyClothingToAtom resolves BreastPhysics/Glute from path.
+                        dragger.LoadSkin(target);
+                        return true;
+                    }
+
+                    if (pathMorphs || (!pathAppearance && !pathPose && category.Contains("Morphs")))
+                    {
+                        Atom target = GetBestTargetAtom();
+                        VPB.src.util.AppearanceApplyProbe.Route(category, file.Path, itemTypeName, "LoadMorphs",
+                            pathAppearance, pathPose, pathSkin, pathBreast, pathGlute, pathMorphs, pathHair, pathClothing,
+                            target != null ? target.uid : null);
                         if (target == null) { LogUtil.LogWarning("[VPB] Please select a Person atom."); return false; }
                         dragger.LoadMorphs(target);
                         return true;
                     }
 
-                    if (pathLower.Contains("/appearance/") || pathLower.Contains("\\appearance\\") || category.Contains("Appearance"))
+                    // Pose before Appearance: Appearance category must not load Pose/*.vap as looks.
+                    if (pathPose || (!pathAppearance && category.Contains("Pose")))
                     {
                         Atom target = GetBestTargetAtom();
+                        VPB.src.util.AppearanceApplyProbe.Route(category, file.Path, itemTypeName, "LoadPose",
+                            pathAppearance, pathPose, pathSkin, pathBreast, pathGlute, pathMorphs, pathHair, pathClothing,
+                            target != null ? target.uid : null);
                         if (target == null) { LogUtil.LogWarning("[VPB] Please select a Person atom."); return false; }
-                        dragger.LoadAppearance(target);
+                        dragger.LoadPose(target);
                         return true;
                     }
 
+                    if (pathAppearance || (category.Contains("Appearance") && !pathPose && !pathSkin && !pathBreast && !pathGlute && !pathMorphs && !pathHair && !pathClothing))
+                    {
+                        Atom target = GetBestTargetAtom();
+                        VPB.src.util.AppearanceApplyProbe.Route(category, file.Path, itemTypeName, "LoadAppearance",
+                            pathAppearance, pathPose, pathSkin, pathBreast, pathGlute, pathMorphs, pathHair, pathClothing,
+                            target != null ? target.uid : null);
+                        return TryLoadAppearanceAutoSpawningIfNeeded(file, dragger);
+                    }
+
+                    // Skin category fallback only when path is not another person-preset type.
+                    if (category.Contains("Skin") && !pathAppearance && !pathPose && !pathBreast && !pathGlute && !pathMorphs)
+                    {
+                        Atom target = GetBestTargetAtom();
+                        VPB.src.util.AppearanceApplyProbe.Route(category, file.Path, itemTypeName, "LoadSkin(catFallback)",
+                            pathAppearance, pathPose, pathSkin, pathBreast, pathGlute, pathMorphs, pathHair, pathClothing,
+                            target != null ? target.uid : null);
+                        if (target == null) { LogUtil.LogWarning("[VPB] Please select a Person atom."); return false; }
+                        dragger.LoadSkin(target);
+                        return true;
+                    }
+
+                    bool isPluginScript =
+                        (pathLower.Contains("/custom/scripts/") || pathLower.Contains("\\custom\\scripts\\"))
+                        && (pathLower.EndsWith(".cs") || pathLower.EndsWith(".cslist") || pathLower.EndsWith(".dll"));
                     bool isPluginPreset =
                         pathLower.Contains("/custom/atom/person/plugins/") ||
                         pathLower.Contains("\\custom\\atom\\person\\plugins\\") ||
-                        (pathLower.EndsWith(".vap") && (categoryLower.Contains("person plugins") || categoryLower.Contains("plugin preset")));
-                    if (isPluginPreset)
+                        pathLower.Contains("/custom/pluginpresets/") ||
+                        pathLower.Contains("\\custom\\pluginpresets\\") ||
+                        (pathLower.EndsWith(".vap") && (categoryLower.Contains("person plugins") || categoryLower.Contains("plugin preset") || categoryLower.Contains("plugins")));
+                    if (isPluginScript || isPluginPreset || categoryLower.Contains("plugins"))
                     {
-                        Atom target = GetBestTargetAtom();
-                        if (target == null) { LogUtil.LogWarning("[VPB] Please select a Person atom."); return false; }
-                        dragger.LoadPlugins(target);
-                        return true;
+                        // Category "Plugins" also covers script rows; avoid false-positives on non-script/non-vap.
+                        if (isPluginScript || isPluginPreset
+                            || pathLower.EndsWith(".cs") || pathLower.EndsWith(".cslist") || pathLower.EndsWith(".dll")
+                            || pathLower.EndsWith(".vap"))
+                        {
+                            Atom target = GetBestTargetAtom();
+                            if (target == null) { LogUtil.LogWarning("[VPB] Please select a Person atom."); return false; }
+                            dragger.LoadPlugins(target);
+                            return true;
+                        }
                     }
 
-                    if (pathLower.Contains("/pose/") || pathLower.Contains("\\pose\\") || pathLower.Contains("/person/") || pathLower.Contains("\\person\\") || category.Contains("Pose"))
+                    if (pathLower.Contains("/pose/") || pathLower.Contains("\\pose\\") || category.Contains("Pose"))
                     {
                         Atom target = GetBestTargetAtom();
                         if (target == null) { LogUtil.LogWarning("[VPB] Please select a Person atom."); return false; }
@@ -212,8 +344,102 @@ namespace VPB
 
         private void LoadRandom()
         {
+            LoadRandom(null, null, 0);
+        }
+
+        /// <summary>
+        /// Drop rows that cannot belong to the current category (defense if refresh polluted the list).
+        /// </summary>
+        private List<FileEntry> FilterRandomPoolForCurrentCategory(List<FileEntry> pool)
+        {
+            if (pool == null || pool.Count == 0) return pool;
+            string cat = currentCategoryTitle ?? "";
+            bool appearanceCat = cat.IndexOf("Appearance", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool subSceneCat = cat.IndexOf("SubScene", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool sceneCat = !subSceneCat && (
+                string.Equals(cat, "Scenes", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(cat, "Scene", StringComparison.OrdinalIgnoreCase));
+
+            if (!appearanceCat && !subSceneCat && !sceneCat)
+                return pool;
+
+            var filtered = new List<FileEntry>(pool.Count);
+            int dropped = 0;
+            for (int i = 0; i < pool.Count; i++)
+            {
+                FileEntry f = pool[i];
+                if (f == null) continue;
+                string path = f.Path ?? f.Uid ?? "";
+                string pl = path.Replace('\\', '/');
+
+                if (appearanceCat)
+                {
+                    if (IsForbiddenInAppearanceCategory(pl) || !IsAppearanceLookInternalPath(pl))
+                    {
+                        dropped++;
+                        continue;
+                    }
+                }
+                else if (subSceneCat)
+                {
+                    if (pl.IndexOf("/SubScene/", StringComparison.OrdinalIgnoreCase) < 0
+                        && pl.IndexOf("Custom/SubScene", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        dropped++;
+                        continue;
+                    }
+                }
+                else if (sceneCat)
+                {
+                    string lower = pl.ToLowerInvariant();
+                    if (!(lower.Contains("/scene/") || lower.Contains("saves/scene"))
+                        || lower.Contains("/subscene/"))
+                    {
+                        dropped++;
+                        continue;
+                    }
+                }
+                filtered.Add(f);
+            }
+
+            if (dropped > 0)
+            {
+                try
+                {
+                    LogUtil.LogWarning("[VPB] Load Random: dropped " + dropped
+                        + " out-of-category item(s) from pool (cat='" + cat + "', kept=" + filtered.Count + ")");
+                }
+                catch { }
+            }
+            return filtered;
+        }
+
+        /// <param name="excludeIdentityKey">
+        /// When set and pool has 2+ items, never pick this identity (path/uid). Retries then linear scan.
+        /// </param>
+        private void LoadRandom(string excludeIdentityKey)
+        {
+            LoadRandom(excludeIdentityKey, null, 0);
+        }
+
+        /// <param name="excludeIdentityKey">
+        /// When set and pool has 2+ items, never pick this identity (path/uid). Retries then linear scan.
+        /// </param>
+        /// <param name="replaceModeOverride">
+        /// Null = persisted Add/Replace. Non-null forces mode for this sync apply only (filter multi-random).
+        /// </param>
+        /// <param name="replaceOverrideToken">Owner token for scoped override clear (filter-randomize gen).</param>
+        private void LoadRandom(string excludeIdentityKey, bool? replaceModeOverride, int replaceOverrideToken)
+        {
+            bool overrideHeld = false;
             try
             {
+                if (replaceModeOverride.HasValue && replaceOverrideToken != 0)
+                {
+                    BeginDragDropReplaceOverride(replaceModeOverride.Value, replaceOverrideToken);
+                    overrideHeld = true;
+                }
+
                 // Prefer the currently visible list (includes top search + filter-mode search).
                 // lastFilteredFiles is a post-refresh snapshot and does not change when the user searches.
                 var pool = (currentFilteredFiles != null && currentFilteredFiles.Count > 0)
@@ -226,13 +452,31 @@ namespace VPB
                     return;
                 }
 
-                int idx = UnityEngine.Random.Range(0, pool.Count);
-                FileEntry file = pool[idx];
+                // Category-safe pool: Appearance must not pick SubScene/Scene rows if list was polluted.
+                pool = FilterRandomPoolForCurrentCategory(pool);
+                if (pool == null || pool.Count == 0)
+                {
+                    LogUtil.LogWarning("[VPB] Load Random: no category-matching items in filtered view.");
+                    return;
+                }
+
+                bool historyBrowse = activeContentType == ContentType.History;
+
+                string excludeKey = excludeIdentityKey;
+                if (string.IsNullOrEmpty(excludeKey))
+                {
+                    try { excludeKey = GetCurrentSelectionAnchorIdentityKey(historyBrowse); } catch { excludeKey = null; }
+                }
+
+                FileEntry file = PickRandomFileEntry(pool, excludeKey, historyBrowse);
                 if (file == null)
                 {
                     LogUtil.LogWarning("[VPB] Load Random: selected file was null.");
                     return;
                 }
+
+                LogUtil.Log("[VPB] Load Random: pick cat='" + (currentCategoryTitle ?? "")
+                    + "' path=" + (file.Path ?? file.Uid ?? "?"));
 
                 // Select it
                 selectedFiles.Clear();
@@ -247,10 +491,12 @@ namespace VPB
                 RefreshSelectionVisuals();
                 UpdatePaginationText();
 
-                // Apply (same logic as click)
-                string pathLower = (file.Path ?? "").ToLowerInvariant();
-                bool isSubScene = pathLower.Contains("/subscene/") || pathLower.Contains("\\subscene\\") || (currentCategoryTitle != null && currentCategoryTitle.Contains("SubScene"));
-                bool isScene = !isSubScene && pathLower.EndsWith(".json") && (pathLower.Contains("/scene/") || pathLower.Contains("\\scene\\") || pathLower.Contains("saves/scene") || (currentCategoryTitle != null && currentCategoryTitle.Contains("Scene")));
+                // Apply (same logic as click). Scene shortcut only when path is a scene — never via
+                // category.Contains("Scene") (would false-match other titles if wording changes).
+                string pathLower = (file.Path ?? "").ToLowerInvariant().Replace('\\', '/');
+                bool isSubScene = pathLower.Contains("/subscene/");
+                bool isScene = !isSubScene && pathLower.EndsWith(".json")
+                    && (pathLower.Contains("/scene/") || pathLower.Contains("saves/scene"));
 
                 if (isScene)
                 {
@@ -267,6 +513,45 @@ namespace VPB
             {
                 LogUtil.LogError("[VPB] Load Random exception: " + ex);
             }
+            finally
+            {
+                if (overrideHeld)
+                    EndDragDropReplaceOverride(replaceOverrideToken);
+            }
+        }
+
+        /// <summary>
+        /// Pick random pool entry. When <paramref name="excludeIdentityKey"/> set and pool has 2+
+        /// candidates, never return that identity (retry then linear scan). Single-item pool may return it.
+        /// </summary>
+        private FileEntry PickRandomFileEntry(List<FileEntry> pool, string excludeIdentityKey, bool historyBrowse)
+        {
+            if (pool == null || pool.Count == 0) return null;
+
+            if (pool.Count == 1 || string.IsNullOrEmpty(excludeIdentityKey))
+                return pool[UnityEngine.Random.Range(0, pool.Count)];
+
+            int attempts = Mathf.Min(pool.Count * 2, 32);
+            for (int a = 0; a < attempts; a++)
+            {
+                FileEntry cand = pool[UnityEngine.Random.Range(0, pool.Count)];
+                if (cand == null) continue;
+                string key = GetSelectionIdentityKey(cand, historyBrowse);
+                if (!string.Equals(key, excludeIdentityKey, StringComparison.OrdinalIgnoreCase))
+                    return cand;
+            }
+
+            for (int i = 0; i < pool.Count; i++)
+            {
+                FileEntry cand = pool[i];
+                if (cand == null) continue;
+                string key = GetSelectionIdentityKey(cand, historyBrowse);
+                if (!string.Equals(key, excludeIdentityKey, StringComparison.OrdinalIgnoreCase))
+                    return cand;
+            }
+
+            // Only matching identity in pool — unavoidable.
+            return pool[UnityEngine.Random.Range(0, pool.Count)];
         }
 
         /// <summary>
@@ -382,6 +667,25 @@ namespace VPB
 
         public void Show(string title, string extension, string path)
         {
+            if (_showReentrancyDepth > 0)
+            {
+                LogUtil.LogWarning("[Gallery] GalleryPanel.Show re-entrancy ignored: title='" + title
+                    + "' path='" + path + "' depth=" + _showReentrancyDepth);
+                return;
+            }
+            _showReentrancyDepth++;
+            try
+            {
+                ShowCore(title, extension, path);
+            }
+            finally
+            {
+                _showReentrancyDepth--;
+            }
+        }
+
+        private void ShowCore(string title, string extension, string path)
+        {
             var sw = System.Diagnostics.Stopwatch.StartNew();
             bool needsInit = canvas == null;
             LogUtil.Log("[Gallery] GalleryPanel.Show entry: title='" + title + "' path='" + path + "' needsInit=" + needsInit + " currentPath='" + currentPath + "' hasLoadedContent=" + hasLoadedContent);
@@ -391,6 +695,13 @@ namespace VPB
             {
                 ShowTemporaryStatus(VPBTranslation.T("bench.pick.block_nav",
                     "End Scene Load Test selection first (Done or Cancel)."), 2.5f);
+                return;
+            }
+            if (_stripKeepSubScenePickActive && !StripKeepSubScenePickAllowsShowRequest(title))
+            {
+                ShowTemporaryStatus(VPBTranslation.T(
+                    "gallery.creator.strip_subscene_pick_block_nav",
+                    "End SubScene pick first (Confirm Pick or Cancel Pick)."), 2.5f);
                 return;
             }
 
@@ -420,7 +731,8 @@ namespace VPB
 
             // Switching middle content (category/page) must leave internal settings mode.
             // Default behavior: auto-save on exit; only explicit Discard uses cancel path.
-            if (IsSettingsPanelOpen() || settingsListViewActive)
+            bool exitedSettingsMode = IsSettingsPanelOpen() || settingsListViewActive;
+            if (exitedSettingsMode)
                 ExitInternalSettingsMode(true);
 
             bool registeredBefore = _registeredWithSuperController;
@@ -502,28 +814,14 @@ namespace VPB
                 SaveCategoryScrollCache();
             }
             string nextCategoryKey = MakeCategoryScrollKey(title, path);
-            if (!hasLoadedContent)
+            // Restore scroll from in-memory or disk cache (gallery_scroll.json). Normalized Y stays usable when list length shifts.
+            if (categoryScrollPositions.TryGetValue(nextCategoryKey, out float cachedScroll))
             {
-                // Cold launch should always start at top.
-                _pendingScrollRestore = 1f;
-            }
-            else if (paramsChanged)
-            {
-                // Category switch: only restore positions that were captured in this runtime session.
-                // Persisted cache values from previous runs are intentionally ignored here to prevent stale/random starts.
-                if (sessionCategoryScrollKeys.Contains(nextCategoryKey) &&
-                    categoryScrollPositions.TryGetValue(nextCategoryKey, out float _sp))
-                    _pendingScrollRestore = Mathf.Clamp01(_sp);
-                else
-                    _pendingScrollRestore = 1f;
+                _pendingScrollRestore = Mathf.Clamp01(cachedScroll);
+                sessionCategoryScrollKeys.Add(nextCategoryKey);
             }
             else
-            {
-                // Same-view reopen/refresh can restore remembered position.
-                _pendingScrollRestore = categoryScrollPositions.TryGetValue(nextCategoryKey, out float _sp)
-                    ? Mathf.Clamp01(_sp)
-                    : 1f;
-            }
+                _pendingScrollRestore = 1f;
 
             currentExtension = extension;
             currentPath = path;
@@ -552,7 +850,9 @@ namespace VPB
 
             // Decide refresh before UpdateLayout so we can avoid synchronous full-library cache scans
             // (CacheCreators / CacheCategoryCounts) when RefreshFilesRoutine will rebuild them on a worker thread.
-            bool shouldRefresh = paramsChanged || !hasLoadedContent || packagesChanged;
+            // Exiting Settings must always refresh browse rows — same-category Show early-return otherwise
+            // leaves only Sync's async Refresh, which can lose the race to Grid restore (VR tile stick).
+            bool shouldRefresh = paramsChanged || !hasLoadedContent || packagesChanged || exitedSettingsMode;
             bool startupDeferredInitialRefresh = false;
             if (shouldRefresh && !hasLoadedContent && !LogUtil.IsStartupReadyLogged())
             {
@@ -576,7 +876,7 @@ namespace VPB
             }
 
             // Fast reopen path: same already-loaded view should just become visible again.
-            // Do not run layout/tabs/refresh logic here; it causes the redraw/flicker you reported.
+            // Do not run layout/tabs/refresh or sync CacheCategoryCounts/CacheCreators here — that was the open/minimize hitch.
             if (sameViewReopen && hasLoadedContent && !shouldRefresh)
             {
                 SetCanvasVisible(true);
@@ -586,9 +886,9 @@ namespace VPB
                     lastAppliedPackageRefreshTime = pkgRefreshTime;
                     try { RefreshVisibleGridVisualsOnly(); } catch { }
                 }
-                // Restore split sub-pane chrome (tags / scene source) after hide — no list rebuild.
+                // Light chrome only — defer package-scan side-tab rebuild off the Show spike.
                 try { UpdateTabsImpl(rebuildSideTabLists: false); } catch { }
-                try { EnsureSideTabsFreshForPackageScan(); } catch { }
+                try { ScheduleDeferredSideTabsFreshAfterReopen(); } catch { }
                 try { TryApplyPendingPackageDeltaOnShow(); } catch { }
                 CancelGalleryCategoryTypeNavigationTiming("same_view_reopen");
                 LogUtil.Log("[Gallery] GalleryPanel.Show done: " + sw.ElapsedMilliseconds + "ms title='" + currentCategoryTitle + "' path='" + currentPath + "'");
@@ -716,10 +1016,72 @@ namespace VPB
             _userHidden = true;
             _hiddenByMenuGate = false;
             VpbPerfDiag.LogTransition("GalleryPanel.Hide", "userHidden=true");
+            try { PersistCurrentBrowsePlace(); } catch { }
             SetCanvasVisible(false);
 
             hoverCount = 0;
             try { HideHoverPreview(null); } catch { }
+        }
+
+        /// <summary>Write scroll + category filters before hide/close so reopen and next VaM session can restore place.</summary>
+        private void PersistCurrentBrowsePlace()
+        {
+            if (!hasLoadedContent) return;
+            if (!_scrollCacheLoaded) LoadCategoryScrollCache();
+            if (scrollRect != null && !string.IsNullOrEmpty(currentPath))
+            {
+                string key = MakeCategoryScrollKey(currentCategoryTitle, currentPath);
+                categoryScrollPositions[key] = Mathf.Clamp01(scrollRect.verticalNormalizedPosition);
+                sessionCategoryScrollKeys.Add(key);
+                SaveCategoryScrollCache();
+            }
+            if (!string.IsNullOrEmpty(currentPath))
+                SaveCurrentCategoryFilterState(currentCategoryTitle, currentPath);
+
+            // Keep LastGalleryCategory in sync even when user opened via Initial then never clicked a tab.
+            if (VPBConfig.Instance != null && !string.IsNullOrEmpty(currentCategoryTitle))
+                VPBConfig.Instance.LastGalleryCategory = currentCategoryTitle;
+            if (Settings.Instance != null && Settings.Instance.LastGalleryPage != null
+                && !string.IsNullOrEmpty(currentCategoryTitle))
+            {
+                try { Settings.Instance.LastGalleryPage.Value = currentCategoryTitle; } catch { }
+            }
+
+            // Side rails + Import side: remember which lists were open for Close/recreate.
+            if (VPBConfig.Instance != null)
+            {
+                string leftTok = ContentTypeToSidePanelString(NormalizePersistableSideTabContent(leftActiveContent));
+                string rightTok = ContentTypeToSidePanelString(NormalizePersistableSideTabContent(rightActiveContent));
+                if (importSidebarOpenIntent)
+                {
+                    if (importSidebarOnLeft)
+                        leftTok = "Import";
+                    else
+                        rightTok = "Import";
+                }
+                VPBConfig.Instance.LastGalleryLeftSidePanel = VPBConfig.NormalizeGallerySidePanel(leftTok);
+                VPBConfig.Instance.LastGalleryRightSidePanel = VPBConfig.NormalizeGallerySidePanel(rightTok);
+                VPBConfig.Instance.LastGallerySideRailsSaved = true;
+                try { VPBConfig.Instance.Save(false); } catch { }
+            }
+        }
+
+        private Coroutine _deferredSideTabsFreshCo;
+
+        /// <summary>After same-view Show: run side-tab count refresh next frame so SetActive + Canvas rebuild are not stacked with CacheCreators.</summary>
+        private void ScheduleDeferredSideTabsFreshAfterReopen()
+        {
+            if (!Application.isPlaying) return;
+            if (_deferredSideTabsFreshCo != null) return;
+            _deferredSideTabsFreshCo = StartCoroutine(DeferredSideTabsFreshAfterReopen());
+        }
+
+        private IEnumerator DeferredSideTabsFreshAfterReopen()
+        {
+            yield return null;
+            _deferredSideTabsFreshCo = null;
+            if (canvas == null || !IsVisible) yield break;
+            try { EnsureSideTabsFreshForPackageScan(); } catch { }
         }
 
         private void SetCanvasVisible(bool visible)
@@ -765,15 +1127,21 @@ namespace VPB
             // ensure we run (or schedule) initial refresh on any transition to visible.
             if (visible && Application.isPlaying && !hasLoadedContent && refreshCoroutine == null)
             {
-                // If no category ever selected (should not happen, but can if created without Show()),
-                // force a first Show() using configured initial category.
-                if (string.IsNullOrEmpty(currentPath) && categories != null && categories.Count > 0)
+                // Only auto-Show when no category was selected yet.
+                // Empty path is VALID for ALL VAR / Everything / All — do not treat as unset
+                // (that caused Show→SetCanvasVisible→Show infinite recursion).
+                if (string.IsNullOrEmpty(currentCategoryTitle) && categories != null && categories.Count > 0
+                    && _showReentrancyDepth == 0)
                 {
                     try
                     {
                         var initial = categories[0];
                         string categoryToOpen = null;
-                        if (VPBConfig.Instance != null) categoryToOpen = VPBConfig.Instance.ResolveInitialGalleryCategoryName();
+                        if (VPBConfig.Instance != null && !Gallery.SessionBrowseMemoryActive)
+                            categoryToOpen = VPBConfig.Instance.ResolveInitialGalleryCategoryName();
+                        if (string.IsNullOrEmpty(categoryToOpen) && VPBConfig.Instance != null
+                            && !string.IsNullOrEmpty(VPBConfig.Instance.LastGalleryCategory))
+                            categoryToOpen = VPBConfig.Instance.LastGalleryCategory;
                         if (!string.IsNullOrEmpty(categoryToOpen))
                         {
                             for (int i = 0; i < categories.Count; i++)
@@ -784,6 +1152,15 @@ namespace VPB
                                     break;
                                 }
                             }
+                        }
+                        // Prefer a category with a real browse path when LastGalleryCategory is
+                        // an empty-path virtual root and we still have no title (pane create path).
+                        if (IsVirtualEmptyPathCategory(initial.name, initial.extension)
+                            && string.IsNullOrEmpty(initial.path))
+                        {
+                            Gallery.Category withPath = FindFirstCategoryWithBrowsePath(categories);
+                            if (!string.IsNullOrEmpty(withPath.name))
+                                initial = withPath;
                         }
                         Show(initial.name, initial.extension, initial.path);
                         return;
@@ -878,6 +1255,30 @@ namespace VPB
                 }
             }
 
+        }
+
+        private static bool IsVirtualEmptyPathCategory(string categoryName, string extension)
+        {
+            if (string.Equals(categoryName, "ALL VAR", StringComparison.OrdinalIgnoreCase)) return true;
+            if (string.Equals(categoryName, "All", StringComparison.OrdinalIgnoreCase)) return true;
+            if (Gallery.IsEverythingCategoryName(categoryName)) return true;
+            if (string.Equals(extension, "varpkg", StringComparison.OrdinalIgnoreCase)) return true;
+            if (Gallery.IsEverythingCategoryExtension(extension)) return true;
+            return false;
+        }
+
+        private static Gallery.Category FindFirstCategoryWithBrowsePath(List<Gallery.Category> cats)
+        {
+            if (cats == null) return new Gallery.Category();
+            for (int i = 0; i < cats.Count; i++)
+            {
+                Gallery.Category c = cats[i];
+                if (string.IsNullOrEmpty(c.name)) continue;
+                if (string.IsNullOrEmpty(c.path)) continue;
+                if (IsVirtualEmptyPathCategory(c.name, c.extension)) continue;
+                return c;
+            }
+            return new Gallery.Category();
         }
 
         private static bool IsVamMenuVisible()
@@ -1081,6 +1482,32 @@ namespace VPB
             SetHoverPath(file.Path);
         }
 
+        /// <summary>
+        /// Pointer entered a gallery item — claim info-bar path ownership and show full path.
+        /// Sibling cell exit (deferred) must not wipe this after claim.
+        /// </summary>
+        internal void ClaimHoverPath(UIHoverReveal owner, FileEntry file)
+        {
+            if (owner == null || file == null)
+            {
+                SetHoverPath(file);
+                return;
+            }
+            // Set path first (empty path clears ownership), then claim so deferred sibling exit cannot wipe.
+            SetHoverPath(file);
+            _hoverPathRevealOwner = owner;
+        }
+
+        /// <summary>
+        /// Pointer left a gallery item — restore count fallback only if this reveal still owns the path.
+        /// </summary>
+        internal void ReleaseHoverPath(UIHoverReveal owner)
+        {
+            if (owner == null || _hoverPathRevealOwner != owner) return;
+            _hoverPathRevealOwner = null;
+            RestoreSelectedHoverPath();
+        }
+
         private string GetFilteredVisibleItemsCountText()
         {
             int total = (currentFilteredFiles != null) ? currentFilteredFiles.Count : 0;
@@ -1106,6 +1533,8 @@ namespace VPB
 
         public void SetHoverPath(string path)
         {
+            // Direct callers drop reveal ownership; ClaimHoverPath re-assigns after SetHoverPath(file).
+            _hoverPathRevealOwner = null;
             bool hasPath = !string.IsNullOrEmpty(path);
             hoverPathIsCountMode = !hasPath;
             float targetAlpha = 1f; // pure on/off: always visible (path or count fallback)
@@ -1498,6 +1927,7 @@ namespace VPB
 
             // Import sidebar active: a single click sets the import source (instead of launching the scene),
             // but a double click still opens/launches the scene (falls through to the normal handling below).
+            // Source sync lives in RefreshSelectionVisualsCore so keyboard / scrub share the same path.
             if (importSidebarActive)
             {
                 float importClickTime = Time.realtimeSinceStartup;
@@ -1515,7 +1945,6 @@ namespace VPB
                     selectedPath = importFileKey;
                     SetHoverPath("");
                     RefreshSelectionVisuals();
-                    OpenImportSidebarWith(file, importSidebarTargetAtom);
                     return;
                 }
                 // double click: continue to the normal launch path below.
@@ -1634,6 +2063,11 @@ namespace VPB
                 BenchOnGallerySelectionChangedInPickMode();
                 return;
             }
+            if (_stripKeepSubScenePickActive)
+            {
+                StripKeepOnGallerySelectionChangedInSubScenePick();
+                return;
+            }
 
             // Apply Logic
             // Hold-to-launch overrides 1-click apply: clicks should still select, but only 2-click applies while hold mode is on.
@@ -1651,6 +2085,7 @@ namespace VPB
         {
             if (file == null) return;
             if (_benchPickModeActive) return;
+            if (_stripKeepSubScenePickActive) return;
             ApplyFileEntryNow(file);
         }
 
@@ -1658,6 +2093,7 @@ namespace VPB
         {
             if (file == null) return;
             if (_benchPickModeActive) return;
+            if (_stripKeepSubScenePickActive) return;
 
             FileEntry applyFile = file;
             FileEntry resolvedScene = TryResolveSceneCategoryPackageRowToSceneJson(file);
@@ -1880,6 +2316,9 @@ namespace VPB
             try { RefreshAppliedUserTagsPaneAfterSelectionChange(); } catch { }
             // Immediate detail-strip / toolbox height sync (avoid waiting for the 250ms poll).
             try { UpdateSelectionContextMenu(); } catch { }
+            // Scene Import source follows gallery selection for all heavy selection paths
+            // (click / keyboard). Scrub uses runHeavySideEffects:false — syncs on commit.
+            try { TryLoadSelectedSceneIntoImportSidebar(); } catch { }
         }
 
         public bool NotifyPackagesChanged(DateTime refreshTime)
@@ -1969,6 +2408,16 @@ namespace VPB
                         + (currentCategoryTitle ?? "") + "'");
                 }
                 catch { }
+                // Delta path may have cached user-tag amounts before cat_mem was ready (issue #84).
+                if (!userTagsCached || !_userTagSideTabCountsReady)
+                {
+                    try
+                    {
+                        if (EnsureSideTabCountsFreshAfterGridReady(force: false))
+                            UpdateTabsImpl(rebuildSideTabLists: true, rebuildSubPaneSideTabLists: true);
+                    }
+                    catch { }
+                }
                 return;
             }
 

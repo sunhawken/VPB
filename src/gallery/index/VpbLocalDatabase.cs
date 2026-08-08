@@ -137,8 +137,24 @@ namespace VPB
         /// <summary>Consecutive rebuilds that finished with incomplete package coverage. Capped to break re-queue loops when a handful of VARs are genuinely uncacheable.</summary>
         private static volatile int s_PostBulkIncompleteRebuildAttempts;
         private const int MaxPostBulkIncompleteRebuildAttempts = 3;
+        /// <summary>Set by <see cref="RebuildCore"/> when it bails for zip-cache readiness; <see cref="RebuildWorker"/> must not spin-requeue.</summary>
+        private static volatile int s_LastRebuildDeferredForCaches;
+        /// <summary>0=ok/completed, 1=deferred caches, 2=no-progress, 3=failed. Used to back off re-queues (Unity 2018: no Task.Delay; TickCount gap).</summary>
+        private static volatile int s_LastFullRebuildOutcome;
+        private const int RebuildOutcomeOk = 0;
+        private const int RebuildOutcomeDeferred = 1;
+        private const int RebuildOutcomeNoProgress = 2;
+        private const int RebuildOutcomeFailed = 3;
+        /// <summary>Consecutive full-rebuild finishes that did not advance ready meta. Circuit-breaks spin loops.</summary>
+        private static volatile int s_NoProgressFullRebuildStreak;
+        private const int MaxNoProgressFullRebuildStreak = 4;
+        /// <summary>Min gap between full-rebuild ThreadPool enqueues after a deferred/no-progress outcome (ms).</summary>
+        private const int MinFullRebuildEnqueueGapAfterNoProgressMs = 2500;
+        private static int s_LastFullRebuildEnqueueTick = unchecked((int)0x80000000);
+        private static volatile int s_LoggedFullRebuildCircuitBreak;
         static int s_LastSqlRebuildDeepScanProgress;
         static int s_LastGalleryRebuildDeferLogPctBucket = -1;
+        static int s_LastFullIndexQueueLogTick = unchecked((int)0x80000000);
         private static volatile bool s_GalleryIndexBuildIndicatorPending;
         private static volatile int s_RebuildProgressDone;
         private static volatile int s_RebuildProgressTotal;
@@ -618,6 +634,7 @@ namespace VPB
 
             EnsurePackageManifestSchema(conn);
             EnsureGalleryUserTagTables(conn);
+            EnsureFilterPresetTables(conn);
         }
 
         /// <summary>UPDATE pkg SET first_scanned = utcbin(wtime) WHERE ...; converts Local-kind wtime to UTC binary in-process. Returns true on success (including no-op).</summary>
@@ -932,6 +949,9 @@ namespace VPB
         {
             if (!VpbSqlite3.IsAvailable) return;
             if (string.IsNullOrEmpty(itemKey)) return;
+            string kindNorm = kind ?? "";
+            // Gallery UI + VaM LoadInternal/LoadAppearance hooks may both see one user action.
+            if (IsRecentHistoryDuplicate(itemKey, kindNorm)) return;
             try
             {
                 using (var conn = new VpbSqlite3.Connection(DbPath))
@@ -942,18 +962,19 @@ namespace VPB
                         "ON CONFLICT(item_key) DO UPDATE SET use_count = use_count + 1, last_used = excluded.last_used, kind = excluded.kind"))
                     {
                         st.BindText(1, itemKey);
-                        st.BindText(2, kind ?? "");
+                        st.BindText(2, kindNorm);
                         st.BindInt64(3, DateTime.UtcNow.ToBinary());
                         st.Step();
                     }
                 }
+                RememberHistoryRecord(itemKey, kindNorm);
                 try { MessageKit.post(MessageDef.GalleryItemUsageRecorded); } catch { }
                 InvalidateGalleryHistoryModeCountsCache();
                 if (LogHistoryRecordWrites)
                 {
                     try
                     {
-                        LogUtil.Log("[VPB.History] TryRecordItemUse kind=" + (kind ?? "") + " key=" + HistoryDebugTruncate(itemKey));
+                        LogUtil.Log("[VPB.History] TryRecordItemUse kind=" + kindNorm + " key=" + HistoryDebugTruncate(itemKey));
                     }
                     catch { }
                 }
@@ -2875,6 +2896,10 @@ namespace VPB
         {
             if (Interlocked.CompareExchange(ref s_PendingSqlRebuildAfterDeepScan, 0, 1) != 1)
                 return;
+            // Allow a fresh attempt after scan made progress (clears circuit-break / backoff).
+            Interlocked.Exchange(ref s_LastFullRebuildOutcome, RebuildOutcomeOk);
+            Interlocked.Exchange(ref s_NoProgressFullRebuildStreak, 0);
+            Interlocked.Exchange(ref s_LoggedFullRebuildCircuitBreak, 0);
             lock (s_Sync) { s_SkipDeferredGallerySqlRebuild = false; }
             try { ScheduleGalleryIndexUpdateAfterScan(forceFullRebuild: true); } catch { }
         }
@@ -3713,6 +3738,17 @@ namespace VPB
             return withCache;
         }
 
+        /// <summary>
+        /// Min zip file-list caches required before a destructive gallery SQL rebuild.
+        /// Always clamped to <paramref name="total"/> so small libraries cannot defer forever
+        /// (historical bug: Max(32, n/10) with n=7 → require 32 → spin forceFullRebuild).
+        /// </summary>
+        internal static int MinPackageCachesRequiredForGalleryRebuild(int total)
+        {
+            if (total <= 0) return 0;
+            return Math.Max(1, Math.Min(total, Math.Max(32, total / 10)));
+        }
+
         /// <summary>Destructive rebuild needs zip file lists; running early only wipes <c>cat_mem</c>.</summary>
         static bool ShouldDeferGalleryRebuildUntilPackageCachesReady(int withCache, int total)
         {
@@ -3724,8 +3760,7 @@ namespace VPB
                     return true;
             }
             catch { }
-            int minRequired = Math.Max(32, total / 10);
-            return withCache < minRequired;
+            return withCache < MinPackageCachesRequiredForGalleryRebuild(total);
         }
 
         static void LogGalleryRebuildDeferredIfChanged(int withCache, int total)
@@ -3877,7 +3912,15 @@ namespace VPB
             }
             // Explorer moves keep UID set; sync pkg.var_path before Path rail / filters query SQL.
             SyncPkgPathsAfterIndexReuse();
-            try { ScheduleGalleryIndexUpdateAfterScan(); } catch { }
+            // Prefer flushing a rebuild that was coalesced while caches/scan were not ready.
+            try
+            {
+                if (Interlocked.CompareExchange(ref s_PendingSqlRebuildAfterDeepScan, 0, 0) == 1)
+                    FlushPendingGalleryIndexAfterDeepScan();
+                else
+                    ScheduleGalleryIndexUpdateAfterScan();
+            }
+            catch { try { ScheduleGalleryIndexUpdateAfterScan(); } catch { } }
         }
 
         static void QueueGalleryIndexUpdateWorker(bool forceFullRebuild)
@@ -3896,24 +3939,17 @@ namespace VPB
 
             if (forceFullRebuild || NeedsFullGalleryIndexBuild())
             {
-                if (!TryClaimGalleryIndexRebuildSlot()) return;
-                if (forceFullRebuild)
-                {
-                    Interlocked.Exchange(ref s_WorkerBypassGallerySkipCheck, 1);
-                    lock (s_Sync) { s_SkipDeferredGallerySqlRebuild = false; }
-                }
-                try { LogUtil.Log(VamStartupOptimizations.LogTag + " gallery index update -> FULL (" + (forceFullRebuild ? "forceFullRebuild" : "NeedsFullGalleryIndexBuild") + ")"); } catch { }
-                s_GalleryIndexBuildIndicatorPending = true;
-                ThreadPool.QueueUserWorkItem(_ => FullIndexBuildWorker());
+                if (!TryEnqueueFullGalleryIndexRebuild(forceFullRebuild
+                    ? "forceFullRebuild"
+                    : "NeedsFullGalleryIndexBuild", forceFullRebuild))
+                    return;
                 return;
             }
 
             if (!VamStartupOptimizations.PreferIncrementalGallerySqlIndex)
             {
-                if (!TryClaimGalleryIndexRebuildSlot()) return;
-                try { LogUtil.Log(VamStartupOptimizations.LogTag + " gallery index update -> FULL (prefer-incremental off)"); } catch { }
-                s_GalleryIndexBuildIndicatorPending = true;
-                ThreadPool.QueueUserWorkItem(_ => FullIndexBuildWorker());
+                if (!TryEnqueueFullGalleryIndexRebuild("prefer-incremental off", false))
+                    return;
                 return;
             }
 
@@ -3932,6 +3968,94 @@ namespace VPB
             var removedPackagesCopy = removedPackages;
             var removedUidsCopy = removedUidsOnly;
             ThreadPool.QueueUserWorkItem(_ => IncrementalIndexUpdateWorker(addedCopy, removedPackagesCopy, removedUidsCopy));
+        }
+
+        /// <summary>
+        /// Single choke point for full gallery SQL rebuild enqueue.
+        /// Rate-limits after deferred/no-progress outcomes and circuit-breaks spin loops
+        /// (warm/concurrent path — no Unity API; Environment.TickCount only).
+        /// </summary>
+        static bool TryEnqueueFullGalleryIndexRebuild(string reason, bool forceBypassSkip)
+        {
+            int lastOutcome = s_LastFullRebuildOutcome;
+            if (lastOutcome == RebuildOutcomeDeferred
+                || lastOutcome == RebuildOutcomeNoProgress
+                || lastOutcome == RebuildOutcomeFailed)
+            {
+                int streak = s_NoProgressFullRebuildStreak;
+                if (streak >= MaxNoProgressFullRebuildStreak)
+                {
+                    Interlocked.Exchange(ref s_PendingSqlRebuildAfterDeepScan, 1);
+                    if (Interlocked.CompareExchange(ref s_LoggedFullRebuildCircuitBreak, 1, 0) == 0)
+                    {
+                        try
+                        {
+                            LogUtil.LogWarning(VamStartupOptimizations.LogTag
+                                + " gallery FULL rebuild circuit-break streak=" + streak
+                                + " — coalescing until scan flush / package-scan complete (reason=" + (reason ?? "?") + ")");
+                        }
+                        catch { }
+                    }
+                    return false;
+                }
+
+                int nowTick = Environment.TickCount;
+                int elapsed = unchecked(nowTick - s_LastFullRebuildEnqueueTick);
+                if (s_LastFullRebuildEnqueueTick != unchecked((int)0x80000000)
+                    && elapsed >= 0
+                    && elapsed < MinFullRebuildEnqueueGapAfterNoProgressMs)
+                {
+                    Interlocked.Exchange(ref s_PendingSqlRebuildAfterDeepScan, 1);
+                    return false;
+                }
+            }
+
+            if (!TryClaimGalleryIndexRebuildSlot()) return false;
+            if (forceBypassSkip)
+            {
+                Interlocked.Exchange(ref s_WorkerBypassGallerySkipCheck, 1);
+                lock (s_Sync) { s_SkipDeferredGallerySqlRebuild = false; }
+            }
+
+            s_LastFullRebuildEnqueueTick = Environment.TickCount;
+            try
+            {
+                int nowTick = Environment.TickCount;
+                int logElapsed = unchecked(nowTick - s_LastFullIndexQueueLogTick);
+                bool logLine = logElapsed < 0 || logElapsed >= 1000;
+                if (logLine)
+                    s_LastFullIndexQueueLogTick = nowTick;
+                if (logLine)
+                    LogUtil.Log(VamStartupOptimizations.LogTag + " gallery index update -> FULL (" + (reason ?? "?") + ")");
+            }
+            catch { }
+
+            s_GalleryIndexBuildIndicatorPending = true;
+            ThreadPool.QueueUserWorkItem(_ => FullIndexBuildWorker());
+            return true;
+        }
+
+        static void NoteFullRebuildOutcome(int outcome)
+        {
+            Interlocked.Exchange(ref s_LastFullRebuildOutcome, outcome);
+            if (outcome == RebuildOutcomeOk)
+            {
+                Interlocked.Exchange(ref s_NoProgressFullRebuildStreak, 0);
+                Interlocked.Exchange(ref s_LoggedFullRebuildCircuitBreak, 0);
+                return;
+            }
+            if (outcome == RebuildOutcomeDeferred
+                || outcome == RebuildOutcomeNoProgress
+                || outcome == RebuildOutcomeFailed)
+            {
+                Interlocked.Increment(ref s_NoProgressFullRebuildStreak);
+            }
+        }
+
+        static void CoalesceFullRebuildInsteadOfSpin()
+        {
+            Interlocked.Exchange(ref s_PendingSqlRebuildAfterDeepScan, 1);
+            lock (s_Sync) { s_SkipDeferredGallerySqlRebuild = false; }
         }
 
         static bool TryClaimGalleryIndexRebuildSlot()
@@ -4159,7 +4283,7 @@ namespace VPB
             {
                 try { LogUtil.LogWarning("[VPB] VpbLocalDatabase: incremental gallery index update failed: " + ex.Message); } catch { }
                 lock (s_Sync) { s_SkipDeferredGallerySqlRebuild = false; }
-                try { QueueGalleryIndexUpdateWorker(true); } catch { }
+                // Caller (IncrementalIndexUpdateWorker) enqueues full rebuild — do not Queue while rebuild slot held.
                 return false;
             }
 
@@ -4261,14 +4385,9 @@ namespace VPB
             bool bulkScan = false;
             try { bulkScan = FileManager.IsBulkDeepScanActive; } catch { }
             if (bulkScan)
-            {
-                Interlocked.Exchange(ref s_PendingSqlRebuildAfterDeepScan, 1);
-                lock (s_Sync) { s_SkipDeferredGallerySqlRebuild = false; }
-            }
-            else
-            {
-                try { QueueGalleryIndexUpdateWorker(true); } catch { }
-            }
+                CoalesceFullRebuildInsteadOfSpin();
+            else if (!TryEnqueueFullGalleryIndexRebuild("incrementalFallback", true))
+                CoalesceFullRebuildInsteadOfSpin();
         }
 
         static void FullIndexBuildWorker()
@@ -4332,6 +4451,8 @@ namespace VPB
             bool suppressIncompleteReschedule = false;
             bool pendingReschedule = false;
             bool bypassSkip = Interlocked.CompareExchange(ref s_WorkerBypassGallerySkipCheck, 0, 1) == 1;
+            Interlocked.Exchange(ref s_LastRebuildDeferredForCaches, 0);
+            bool failed = false;
             try
             {
                 s_RebuildRunning = true;
@@ -4340,6 +4461,7 @@ namespace VPB
             }
             catch (Exception ex)
             {
+                failed = true;
                 s_LastError = ex.Message;
                 try { LogUtil.LogError("[VPB] VpbLocalDatabase: gallery index rebuild failed: " + ex); } catch { }
                 lock (s_Sync)
@@ -4349,7 +4471,8 @@ namespace VPB
                     s_ReadyPkgInvSig = null;
                     s_SkipDeferredGallerySqlRebuild = false;
                 }
-                try { QueueGalleryIndexUpdateWorker(true); } catch { }
+                // Do not Queue while still marked running — that raced with claim/defer and spun.
+                Interlocked.Exchange(ref s_PendingRescheduleAfterRunningRebuild, 1);
             }
             finally
             {
@@ -4367,10 +4490,34 @@ namespace VPB
             if (rebuildCompleted)
             {
                 try { Gallery.NotifyGalleryIndexUpdateCompleted(); } catch { }
+                NoteFullRebuildOutcome(RebuildOutcomeOk);
             }
+
+            // Zip caches not ready / bulk scan: RebuildCore already set PendingSqlRebuildAfterDeepScan.
+            // Immediate force re-queue here was the thousands-of-FULL-lines/sec loop.
+            bool deferredCaches = Interlocked.CompareExchange(ref s_LastRebuildDeferredForCaches, 0, 1) == 1;
+            if (deferredCaches)
+            {
+                NoteFullRebuildOutcome(RebuildOutcomeDeferred);
+                if (pendingReschedule)
+                    CoalesceFullRebuildInsteadOfSpin();
+                return;
+            }
+            if (failed)
+                NoteFullRebuildOutcome(RebuildOutcomeFailed);
+            else if (!rebuildCompleted)
+                NoteFullRebuildOutcome(RebuildOutcomeNoProgress);
+
+            if (Interlocked.CompareExchange(ref s_PendingSqlRebuildAfterDeepScan, 0, 0) == 1)
+            {
+                // Coalesced for scan/cache readiness — wait for FlushPending / NotifyPackageScanCompleted.
+                return;
+            }
+
             if (pendingReschedule)
             {
-                try { QueueGalleryIndexUpdateWorker(true); } catch { }
+                if (!TryEnqueueFullGalleryIndexRebuild("pendingReschedule", true))
+                    CoalesceFullRebuildInsteadOfSpin();
                 return;
             }
             if (rebuildCompleted || suppressIncompleteReschedule) return;
@@ -4380,12 +4527,9 @@ namespace VPB
                 bool bulkScan = false;
                 try { bulkScan = FileManager.IsBulkDeepScanActive; } catch { }
                 if (bulkScan)
-                {
-                    Interlocked.Exchange(ref s_PendingSqlRebuildAfterDeepScan, 1);
-                    lock (s_Sync) { s_SkipDeferredGallerySqlRebuild = false; }
-                }
-                else
-                    QueueGalleryIndexUpdateWorker(true);
+                    CoalesceFullRebuildInsteadOfSpin();
+                else if (!TryEnqueueFullGalleryIndexRebuild("incompleteNeedsFull", true))
+                    CoalesceFullRebuildInsteadOfSpin();
             }
             catch { }
         }
@@ -5051,6 +5195,7 @@ namespace VPB
             if (ShouldDeferGalleryRebuildUntilPackageCachesReady(pkgWithCache, pkgTotal))
             {
                 Interlocked.Exchange(ref s_PendingSqlRebuildAfterDeepScan, 1);
+                Interlocked.Exchange(ref s_LastRebuildDeferredForCaches, 1);
                 lock (s_Sync) { s_SkipDeferredGallerySqlRebuild = false; }
                 LogGalleryRebuildDeferredIfChanged(pkgWithCache, pkgTotal);
                 return;
@@ -5431,7 +5576,9 @@ namespace VPB
                 if (catMemIncomplete && bulkActive) queueAnotherRebuild = false;
                 if (queueAnotherRebuild)
                 {
-                    try { QueueGalleryIndexUpdateWorker(true); } catch { }
+                    // Still inside RebuildCore / RebuildWorker slot — coalesce; worker postamble enqueues with backoff.
+                    CoalesceFullRebuildInsteadOfSpin();
+                    Interlocked.Exchange(ref s_PendingRescheduleAfterRunningRebuild, 1);
                 }
                 return;
             }
@@ -5678,7 +5825,9 @@ namespace VPB
                 for (int i = 0; i < exts2.Length; i++)
                 {
                     string e = exts2[i] != null ? exts2[i].Trim() : "";
-                    if (e.Length > 0) extSet.Add(e);
+                    // Pseudo tokens (vpbeverything / varpkg) are category markers, not file suffixes.
+                    if (e.Length > 0 && !Gallery.IsGalleryPseudoExtensionToken(e))
+                        extSet.Add(e);
                 }
             }
 
@@ -5688,6 +5837,9 @@ namespace VPB
                 {
                     bool hasTags = activeTags != null && activeTags.Count > 0;
                     bool hasCat = !string.IsNullOrEmpty(categoryTitle);
+                    // ALL VAR is package-level; cat_mem has no "ALL VAR" rows — caller must use TryReadVarPackageCreatorCounts.
+                    if (hasCat && IsGalleryAllVarPseudoCategory(categoryTitle))
+                        return false;
                     string normalizedPackagePathFilter = "";
                     bool hasPackagePathFilter = false;
                     if (!string.IsNullOrEmpty(packagePathFilter))
@@ -5695,8 +5847,10 @@ namespace VPB
                         normalizedPackagePathFilter = packagePathFilter.Replace('\\', '/').Trim().Trim('/');
                         hasPackagePathFilter = normalizedPackagePathFilter.Length > 0;
                     }
-                    bool hasPathPrefix = (pathPrefixes != null && pathPrefixes.Count > 0) || !string.IsNullOrEmpty(singlePathPrefix);
                     bool isEverythingC3 = hasCat && Gallery.IsEverythingCategoryName(categoryTitle);
+                    // EVERYTHING grid is all cat_mem (minus previews); category.paths are loose-disk roots only — do not AND them here.
+                    bool hasPathPrefix = !isEverythingC3
+                        && ((pathPrefixes != null && pathPrefixes.Count > 0) || !string.IsNullOrEmpty(singlePathPrefix));
                     var sb = new StringBuilder();
                     string countExpr = (hasCat && !isEverythingC3) ? "COUNT(*)" : "COUNT(DISTINCT m.pkg_uid || char(0) || m.internal_path)";
                     sb.Append("SELECT p.creator, ").Append(countExpr).Append(" ");
@@ -5900,7 +6054,8 @@ namespace VPB
                 for (int i = 0; i < exts.Length; i++)
                 {
                     string e = exts[i] != null ? exts[i].Trim() : "";
-                    if (e.Length > 0) extSet.Add(e.ToLowerInvariant());
+                    if (e.Length > 0 && !Gallery.IsGalleryPseudoExtensionToken(e))
+                        extSet.Add(e.ToLowerInvariant());
                 }
             }
 
@@ -5929,9 +6084,12 @@ namespace VPB
                     bool hasTags = activeTags != null && activeTags.Count > 0;
                     var creatorList = SplitCreatorFilterList(creatorFilter);
                     bool hasCreator = creatorList.Count > 0;
-                    bool hasPathPrefix = (pathPrefixes != null && pathPrefixes.Count > 0) || !string.IsNullOrEmpty(singlePathPrefix);
 
                     bool isEverythingC2 = Gallery.IsEverythingCategoryName(categoryTitle);
+                    // EVERYTHING: category.paths are loose-disk roots, not cat_mem path filters.
+                    bool hasPathPrefix = !isEverythingC2
+                        && ((pathPrefixes != null && pathPrefixes.Count > 0) || !string.IsNullOrEmpty(singlePathPrefix));
+
                     string countExprC2 = isEverythingC2 ? "COUNT(DISTINCT m.pkg_uid || char(0) || m.internal_path)" : "COUNT(*)";
                     var sb = new StringBuilder();
                     sb.Append("SELECT ifnull(p.var_path,''), ").Append(countExprC2).Append(" ");
@@ -6576,7 +6734,8 @@ namespace VPB
         }
 
         // Applies binds from a GalleryCategoryWhereContext to a prepared statement, starting at bind slot `bindStart`.
-        // Order: category (if not everything), creator, name/search text, exclusions, inclusions, tags, userTags, search int64 (time).
+        // Order must match SQL fragment order in TryQueryGalleryCategoryRows:
+        // category, creator, name/search text, search time (int64), exclusions, inclusions, tags, userTags, excluded userTags.
         // Returns next available bind slot.
         internal static int BindGalleryCategoryWhere(VpbSqlite3.Statement stmt, GalleryCategoryWhereContext ctx, int bindStart)
         {
@@ -6586,9 +6745,13 @@ namespace VPB
                 for (int i = 0; i < ctx.CreatorBindValues.Count; i++) stmt.BindText(b++, ctx.CreatorBindValues[i] ?? "");
             if (ctx.NameBindValues != null)
                 for (int i = 0; i < ctx.NameBindValues.Count; i++) stmt.BindText(b++, ctx.NameBindValues[i] ?? "");
-            // SearchTimeAndFragment sits immediately after NameAndFragment in SQL.
-            if (ctx.SearchInt64BindValues != null)
-                for (int i = 0; i < ctx.SearchInt64BindValues.Count; i++) stmt.BindInt64(b++, ctx.SearchInt64BindValues[i]);
+            // Only bind int64 time values when SearchTimeAndFragment actually has placeholders.
+            if (!string.IsNullOrEmpty(ctx.SearchTimeAndFragment)
+                && ctx.SearchInt64BindValues != null)
+            {
+                for (int i = 0; i < ctx.SearchInt64BindValues.Count; i++)
+                    stmt.BindInt64(b++, ctx.SearchInt64BindValues[i]);
+            }
             if (ctx.ExclusionBindValues != null)
                 for (int i = 0; i < ctx.ExclusionBindValues.Count; i++) stmt.BindText(b++, ctx.ExclusionBindValues[i] ?? "");
             if (ctx.InclusionBindValues != null)
@@ -6600,6 +6763,32 @@ namespace VPB
             if (ctx.ExcludedUserTagBindValues != null)
                 for (int i = 0; i < ctx.ExcludedUserTagBindValues.Count; i++) stmt.BindText(b++, ctx.ExcludedUserTagBindValues[i] ?? "");
             return b;
+        }
+
+        static int CountSqlPlaceholders(string sql)
+        {
+            if (string.IsNullOrEmpty(sql)) return 0;
+            int n = 0;
+            for (int i = 0; i < sql.Length; i++)
+            {
+                if (sql[i] == '?') n++;
+            }
+            return n;
+        }
+
+        static int CountGalleryCategoryWhereBinds(GalleryCategoryWhereContext ctx)
+        {
+            int n = ctx.IsEverything ? 0 : 1;
+            if (ctx.CreatorBindValues != null) n += ctx.CreatorBindValues.Count;
+            if (ctx.NameBindValues != null) n += ctx.NameBindValues.Count;
+            if (!string.IsNullOrEmpty(ctx.SearchTimeAndFragment) && ctx.SearchInt64BindValues != null)
+                n += ctx.SearchInt64BindValues.Count;
+            if (ctx.ExclusionBindValues != null) n += ctx.ExclusionBindValues.Count;
+            if (ctx.InclusionBindValues != null) n += ctx.InclusionBindValues.Count;
+            if (ctx.TagBindValues != null) n += ctx.TagBindValues.Count;
+            if (ctx.UserTagBindValues != null) n += ctx.UserTagBindValues.Count;
+            if (ctx.ExcludedUserTagBindValues != null) n += ctx.ExcludedUserTagBindValues.Count;
+            return n;
         }
 
         /// <summary>
@@ -6760,12 +6949,23 @@ namespace VPB
                          .Append(ctx.ExcludedUserTagAndFragment)
                          .Append(orderBy);
                     string sql = sbSql.ToString();
+                    int sqlPlaceholders = CountSqlPlaceholders(sql);
+                    int expectedBinds = CountGalleryCategoryWhereBinds(ctx);
+                    if (sqlPlaceholders != expectedBinds)
+                    {
+                        LogUtil.LogWarning("[VPB.Gallery.SQL] bind/placeholder mismatch cat='"
+                            + categoryTitle + "' placeholders=" + sqlPlaceholders
+                            + " binds=" + expectedBinds
+                            + " — retrying category-only query");
+                        // Fall through to category-only retry below via throw.
+                        throw new InvalidOperationException(
+                            "sqlite_bind_mismatch placeholders=" + sqlPlaceholders + " binds=" + expectedBinds);
+                    }
 
                     using (var stmt = conn.Prepare(sql))
                     {
                         int bind = 1;
                         BindGalleryCategoryWhere(stmt, ctx, bind);
-                        // BindGalleryCategoryWhere returns next slot; we don't need it here.
 
                         int step;
                         while ((step = stmt.Step()) == VpbSqlite3.SqliteRow)
@@ -6797,6 +6997,65 @@ namespace VPB
             }
             catch (Exception ex)
             {
+                // Bind mismatch / SQLITE_RANGE: retry minimal category=? query so Appearance does not
+                // fall through to package scan that accepts every json|vap (SubScenes).
+                if (!Gallery.IsEverythingCategoryName(categoryTitle)
+                    && outRows != null
+                    && (ex.Message != null && (ex.Message.IndexOf("sqlite3_bind", StringComparison.OrdinalIgnoreCase) >= 0
+                        || ex.Message.IndexOf("sqlite_bind_mismatch", StringComparison.OrdinalIgnoreCase) >= 0
+                        || ex.Message.IndexOf("bind_text failed: 25", StringComparison.OrdinalIgnoreCase) >= 0)))
+                {
+                    try
+                    {
+                        outRows.Clear();
+                        using (var conn2 = new VpbSqlite3.Connection(DbPath))
+                        {
+                            string loadedSel = "0";
+                            try { if (PkgHasLoadedColumn(conn2)) loadedSel = "ifnull(p.loaded,0)"; } catch { }
+                            string sqlRetry =
+                                "SELECT m.pkg_uid, m.internal_path, m.list_path, p.var_path, p.wtime, p.psize, ifnull(p.ictime, p.pctime), ifnull(m.cloth_attr,''), "
+                                + loadedSel + ", ifnull(p.first_scanned, 0) "
+                                + "FROM cat_mem m INNER JOIN pkg p ON p.uid = m.pkg_uid WHERE m.category = ?";
+                            using (var stmt2 = conn2.Prepare(sqlRetry))
+                            {
+                                stmt2.BindText(1, categoryTitle);
+                                int step;
+                                while ((step = stmt2.Step()) == VpbSqlite3.SqliteRow)
+                                {
+                                    Row r;
+                                    r.ItemUsageKey = null;
+                                    r.PackageUid = stmt2.ColumnText(0);
+                                    r.InternalPath = stmt2.ColumnText(1);
+                                    r.ListPath = stmt2.ColumnText(2) ?? "";
+                                    r.VarPath = stmt2.ColumnText(3) ?? "";
+                                    r.LastWriteTicksOrInvalid = stmt2.ColumnInt64(4);
+                                    r.PackageSizeOrInvalid = stmt2.ColumnInt64(5);
+                                    r.PackageCreationTicksOrInvalid = stmt2.ColumnInt64(6);
+                                    r.ClothingAttrPacked = (int)stmt2.ColumnInt64(7);
+                                    r.PackageIsLoaded = stmt2.ColumnInt64(8) != 0;
+                                    r.FirstScannedTicksOrInvalid = stmt2.ColumnInt64(9);
+                                    r.ItemUsageCount = 0;
+                                    r.ItemLastUsedBinary = 0;
+                                    if (r.PackageUid.Length > 0 && r.InternalPath.Length > 0)
+                                        outRows.Add(r);
+                                }
+                            }
+                        }
+                        stats.ExecutedQuery = true;
+                        stats.RowsRead = outRows.Count;
+                        stats.RejectReason = "bind_retry_category_only:" + ex.Message;
+                        LogUtil.LogWarning("[VPB.Gallery.SQL] category-only retry ok cat='"
+                            + categoryTitle + "' rows=" + outRows.Count + " after " + ex.Message);
+                        return true;
+                    }
+                    catch (Exception ex2)
+                    {
+                        s_LastError = ex2.Message;
+                        stats.RejectReason = "exception:" + ex.Message + "; retry:" + ex2.Message;
+                        return false;
+                    }
+                }
+
                 s_LastError = ex.Message;
                 stats.RejectReason = "exception:" + ex.Message;
                 return false;

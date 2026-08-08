@@ -51,7 +51,7 @@ namespace VPB
             if (panel == null) return;
             UI.DestroyAllChildren(panel);
 
-            bool ratingActive = !string.IsNullOrEmpty(currentRatingFilter);
+            bool ratingActive = HasRatingPresenceFilter();
             bool fpsActive = fpsText != null && fpsText.gameObject != null && fpsText.gameObject.activeSelf;
 
             AddOverflowMenuRow(
@@ -67,6 +67,88 @@ namespace VPB
                 icon: UI.GetButtonIconSprite(_titleBarQfToggleBtnRT != null ? _titleBarQfToggleBtnRT.gameObject : null)
                     ?? UI.LoadIconSprite("vpb_icons/filter.png", UI.BarIconGlyphTint),
                 tipKey: "gallery.tooltip.filter_presets", tipDefault: "Filter Presets");
+
+            // Session recent applies (recognition).
+            try
+            {
+                var recent = new System.Collections.Generic.List<QuickFilterEntry>(4);
+                CollectRecentQuickFilters(recent);
+                Sprite applyIcon = UI.LoadIconSprite("vpb_icons/filter.png", UI.BarIconGlyphTint);
+                for (int i = 0; i < recent.Count; i++)
+                {
+                    QuickFilterEntry re = recent[i];
+                    if (re == null) continue;
+                    string label = string.Format(
+                        VPBTranslation.T("gallery.title.recent_preset", "Recent: {0}"),
+                        re.Name ?? "?");
+                    QuickFilterEntry captured = re;
+                    AddOverflowMenuRow(
+                        panel,
+                        label,
+                        () =>
+                        {
+                            CloseTitleBarOverflowMenu();
+                            ApplyQuickFilterState(captured);
+                        },
+                        icon: applyIcon,
+                        tipKey: null,
+                        tipDefault: string.Format(
+                            VPBTranslation.T("quickfilters.apply_hint", "Apply '{0}'"),
+                            re.Name ?? "?"));
+                }
+            }
+            catch { }
+
+            // Pinned filter presets → Apply + Dice (preserveUi).
+            try
+            {
+                var pinned = new System.Collections.Generic.List<QuickFilterEntry>(4);
+                QuickFilterSettings.Instance.CollectPinnedFilters(pinned);
+                Sprite rndIcon = UI.LoadIconSprite("vpb_icons/random.png", UI.BarIconGlyphTint);
+                Sprite applyIcon = UI.LoadIconSprite("vpb_icons/filter_on.png", UI.BarIconGlyphTint)
+                    ?? UI.LoadIconSprite("vpb_icons/filter.png", UI.BarIconGlyphTint);
+                for (int i = 0; i < pinned.Count; i++)
+                {
+                    QuickFilterEntry pe = pinned[i];
+                    if (pe == null) continue;
+                    QuickFilterEntry captured = pe;
+                    string applyLabel = string.Format(
+                        VPBTranslation.T("gallery.title.apply_preset", "Apply: {0}"),
+                        pe.Name ?? "?");
+                    AddOverflowMenuRow(
+                        panel,
+                        applyLabel,
+                        () =>
+                        {
+                            CloseTitleBarOverflowMenu();
+                            ApplyQuickFilterState(captured);
+                        },
+                        icon: applyIcon,
+                        tipKey: null,
+                        tipDefault: string.Format(
+                            VPBTranslation.T("quickfilters.apply_hint", "Apply '{0}'"),
+                            pe.Name ?? "?"));
+
+                    string label = string.Format(
+                        VPBTranslation.T("gallery.title.randomize_preset", "Rnd: {0}"),
+                        pe.Name ?? "?");
+                    AddOverflowMenuRow(
+                        panel,
+                        label,
+                        () =>
+                        {
+                            CloseTitleBarOverflowMenu();
+                            RandomizeFromFilterPreset(captured, true);
+                        },
+                        icon: rndIcon,
+                        tipKey: null,
+                        tipDefault: string.Format(
+                            VPBTranslation.T("quickfilters.tip.randomize", "Dice: random item from '{0}', restores current view"),
+                            pe.Name ?? "?"));
+                }
+            }
+            catch { }
+
             AddOverflowMenuRow(
                 panel,
                 VPBTranslation.T("gallery.title.creator_filter", "Creator filter"),
@@ -88,14 +170,14 @@ namespace VPB
                 tipDefault: "Filter: source, hidden, always loaded, old versions. Click rows to cycle Off → apply → only. Right-click clears.");
             AddOverflowMenuRow(
                 panel,
-                VPBTranslation.T("gallery.title.rated_only", "Rated only"),
+                ResolveRatingPresenceFilterLabel(),
                 () => { CloseTitleBarOverflowMenu(); ToggleRatingSort(); },
                 ratingActive,
                 icon: UI.GetButtonIconSprite(ratingSortToggleBtn)
-                    ?? (ratingActive ? ratingStarNormalSprite : ratingStarOffSprite)
+                    ?? (ratingActive ? ratingStarOffSprite : ratingStarNormalSprite)
                     ?? UI.LoadIconSprite("vpb_icons/star.png", UI.BarIconGlyphTint),
-                tipKey: "gallery.tooltip.rated_only",
-                tipDefault: "Show Only Rated Items (right-click to clear)");
+                tipKey: null,
+                tipDefault: BuildRatingPresenceFilterTooltip());
             AddOverflowMenuRow(
                 panel,
                 VPBTranslation.T("gallery.title.fps_counter", "FPS counter"),
@@ -103,6 +185,14 @@ namespace VPB
                 fpsActive,
                 tipKey: "gallery.tooltip.fps_counter",
                 tipDefault: "Show or hide the FPS counter");
+            AddOverflowMenuRow(
+                panel,
+                VPBTranslation.T("gallery.title.creator_mode", "Scene Tools"),
+                () => { CloseTitleBarOverflowMenu(); ToggleCreatorMode(); },
+                creatorModeActive,
+                icon: UI.LoadIconSprite("vpb_icons/creator_mode.png", UI.BarIconGlyphTint),
+                tipKey: "gallery.tooltip.creator_mode",
+                tipDefault: "Scene Tools — sticky scene authoring (Strip Scene, …). Not the Creators author list. Ctrl+Shift+K. Esc exits.");
         }
 
         private void AddOverflowMenuRow(

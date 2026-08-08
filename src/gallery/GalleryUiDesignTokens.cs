@@ -3,7 +3,10 @@ namespace VPB
     /// <summary>Design-reference pixel sizes at gallery UI scale 1.0 (before host/DPI factors).</summary>
     public static class GalleryUiDesignTokens
     {
+        /// <summary>Legacy BepInEx overlay UI Scale default (Settings.UIScale). Not used for gallery HostScale.</summary>
         public const float VamUiScaleDesignBaseline = 1.5f;
+        /// <summary>VaM <c>SuperController.monitorUIScale</c> default. Gallery desktop HostScale = monitorUIScale / this.</summary>
+        public const float VamMonitorUiScaleDesignBaseline = 1.0f;
 
         // ── Golden ratio (major splits + decorative aspects only; not spacing/type) ──
         /// <summary>φ ≈ 1.618 — aspect ratios and scale accents.</summary>
@@ -41,6 +44,11 @@ namespace VPB
         public const int TitleFontRef = FontRef;
         public const int FpsFontRef = FontRef;
         public const int StatusBarFontRef = FontRef;
+        /// <summary>
+        /// Shared hide grace for gallery info-bar + quick-menu assignable tips.
+        /// Instant show / tip→tip; delay clear only so exit→enter on adjacent targets does not blink.
+        /// </summary>
+        public const float TooltipHideGraceSec = 0.12f;
         public const int CollapseArrowFontRef = FontRef;
         public const int TitleBarChipFontRef = FontRef;
         public const int TitleBarRatingFontRef = FontRef;
@@ -83,6 +91,11 @@ namespace VPB
         public const float SideTabOpenGridInsetRef = 230f;
         public const float SideTabClosedGridInsetRef = 0f;
         public const float SideTabRowHeightRef = ButtonSizeRef;
+        /// <summary>
+        /// Creator list ★ badge — inset inside <see cref="SideTabRowHeightRef"/> so hover rim
+        /// stays smaller than the row inward outline (badge was full row tall + outward rim).
+        /// </summary>
+        public const float CreatorRatingBadgeSizeRef = ButtonSizeRef - 8f;
         public const float SideTabControlGapRef = 5f;
         public const float SideTabRefreshBtnWidthRef = ButtonSizeRef;
         /// <summary>Sort column + left margin reserved from tab width for main side search (10 + 35).</summary>
@@ -121,6 +134,12 @@ namespace VPB
         public const float FooterDetailStripBandGapRef = 1f;
         /// <summary>Detail-strip thumb edge cap (square); must stay ≥ strip max so preview stays flush.</summary>
         public const float FooterDetailStripThumbMaxRef = FooterDetailStripHeightRef;
+        /// <summary>Prev/next overlay on thumb — same size as gallery chrome buttons.</summary>
+        public const float FooterDetailStripThumbNavBtnRef = ButtonSizeRef;
+        /// <summary>Edge inset for thumb nav overlay buttons (design px at scale 1).</summary>
+        public const float FooterDetailStripThumbNavInsetRef = 4f;
+        /// <summary>Scrub index chip height on thumb (n/N) — match button chrome.</summary>
+        public const float FooterDetailStripThumbScrubIndexHRef = ButtonSizeRef;
         /// <summary>Top drag grip hit height (sits above strip content, not over it).</summary>
         public const float FooterDetailStripResizeGripRef = 14f;
         /// <summary>Center grab-handle size inside the resize grip.</summary>
@@ -131,6 +150,11 @@ namespace VPB
         /// main-column rows over the wide side column.
         /// </summary>
         public const float FooterDetailStripStackSideMinHeightRef = 220f;
+        /// <summary>
+        /// Height hysteresis for stack-side vs SideCol. Must cover typical height delta when
+        /// desc/package-tags move left (extra wrap rows + gaps) or height hunts forever.
+        /// </summary>
+        public const float FooterDetailStripStackSideHysteresisRef = 96f;
         /// <summary>Max wrapped description lines in the main column when stacking by height.</summary>
         public const int FooterDetailStripLeftDescMaxLines = 5;
         /// <summary>Min strip width before right info column (desc + native tags) opens.</summary>
@@ -185,6 +209,8 @@ namespace VPB
         public const float ImportSidebarWidthRef = 220f;
         public const float ImportSidebarHeaderHeightRef = 32f;
         public const float ImportSidebarApplyHeightRef = ButtonSizeRef;
+        /// <summary>Pinned reason line above Apply when import is blocked.</summary>
+        public const float ImportSidebarApplyReasonHeightRef = 18f;
         public const float ImportSidebarSideMarginRef = 10f;
         public const float ImportSidebarTopRowRef = 65f;
         public const float ImportSidebarScrollBarWidthRef = 10f;
@@ -196,6 +222,19 @@ namespace VPB
         public const float ImportSidebarRowHeightRef = ButtonSizeRef;
         public const int ImportSidebarFontRef = FontRef;
         public const int ImportSidebarFontMin = FontMinRef;
+        /// <summary>Floating Scene Import window defaults / clamps (design px at scale 1).</summary>
+        public const float ImportSidebarFloatDefaultWidthRef = 360f;
+        public const float ImportSidebarFloatDefaultHeightRef = 560f;
+        public const float ImportSidebarFloatMinWidthRef = 220f;
+        public const float ImportSidebarFloatMinHeightRef = 320f;
+        /// <summary>Soft floor for max size; live max also grows to float-host rect (low DPI / UI scale).</summary>
+        public const float ImportSidebarFloatMaxWidthRef = 900f;
+        public const float ImportSidebarFloatMaxHeightRef = 1600f;
+        /// <summary>Hard ceiling in design px (corrupt prefs / bad host read).</summary>
+        public const float ImportSidebarFloatAbsoluteMaxWidthRef = 4000f;
+        public const float ImportSidebarFloatAbsoluteMaxHeightRef = 4000f;
+        /// <summary>Inset from float host edges when computing max size.</summary>
+        public const float ImportSidebarFloatHostMarginRef = 24f;
 
         // In-app help panel
         public const float InAppHelpPanelWidthRef = 460f;
@@ -226,6 +265,23 @@ namespace VPB
         public const int PopupMenuOverflowFontRef = FontRef;
         public const float PopupMenuAnchorGapRef = 2f;
         public const float PopupMenuPanelWidthRef = 230f;
+        /// <summary>Filter-presets dropdown: search + Float chip + sort need wider panel than plain popup rows.</summary>
+        public const float QuickFiltersPanelWidthRef = 300f;
+        /// <summary>Filter-presets list scrollbar — match dense secondary panels (import sidebar), not fat side-tab track.</summary>
+        public const float QuickFiltersScrollBarWidthRef = 10f;
+        /// <summary>Floating filter-presets window defaults / clamps (design px at scale 1).</summary>
+        public const float QuickFiltersFloatDefaultHeightRef = 420f;
+        public const float QuickFiltersFloatMinWidthRef = 220f;
+        /// <summary>Title + search header + footer + one row — room for float chrome.</summary>
+        public const float QuickFiltersFloatMinHeightRef = 260f;
+        public const float QuickFiltersFloatMaxWidthRef = 640f;
+        public const float QuickFiltersFloatMaxHeightRef = 900f;
+        /// <summary>Fits <see cref="ButtonSizeRef"/> collapse/close chips + pad (Jakob with gallery chrome).</summary>
+        public const float QuickFiltersTitleBarHeightRef = ButtonSizeRef + 8f;
+        /// <summary>Float footer: undo/redo + resize grip row (merge lives on actions row).</summary>
+        public const float QuickFiltersFooterHeightRef = ButtonSizeRef + 8f;
+        /// <summary>Max leaf presets selectable when merging into one multi-random preset.</summary>
+        public const int QuickFiltersMergeMaxMembers = 6;
         public const float OverflowMenuPanelWidthRef = 300f;
         public const float FileSortMenuPanelWidthRef = 248f;
         public const float SidePaneSortMenuPanelWidthRef = 228f;
@@ -239,15 +295,18 @@ namespace VPB
 
         // Spring scroll drag button (on main grid scrollbar)
         public const float SpringScrollBtnWidthFixedRef = 50f;
-        public const float SpringScrollBtnWidthFloatRef = 100f;
+        /// <summary>Floating/VR: half prior width — dense Fitts hit beside track, not oversized chrome.</summary>
+        public const float SpringScrollBtnWidthFloatRef = 50f;
         public const float SpringScrollBtnAspectRef = GoldenRatio;
         public const float SpringScrollBtnIconInsetRef = 24f;
+        /// <summary>Floating/VR only: nudge left of scrollbar center so control sits beside track (px at ref scale).</summary>
+        public const float SpringScrollBtnOffsetXFloatRef = -16f;
 
         // Toolbox action buttons — sized to match the side-rail / title-chip family
         // (uniform with TboxPinBtnSizeRef) and scaled proportionally inside the info row.
         public const float TboxActionButtonSizeRef = ButtonSizeRef;
 
-        // Toolbox pin + in-app help close
+        // In-app help close (legacy name kept; sized with action buttons)
         public const float TboxPinBtnSizeRef = ButtonSizeRef;
         public const float InAppHelpCloseBtnSizeRef = ButtonSizeRef;
         public const float InAppHelpCloseBtnRightInsetRef = 6f;

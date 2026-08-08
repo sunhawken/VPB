@@ -281,6 +281,7 @@
     <Compile Include="src\util\XrUtils.cs" />
     <Compile Include="src\util\AtomGenderUtils.cs" />
     <Compile Include="src\util\AppearancePresetSuppress.cs" />
+    <Compile Include="src\util\AppearanceApplyProbe.cs" />
     <Compile Include="src\util\CslistParser.cs" />
     <Compile Include="src\util\VarPresetPathFixups.cs" />
     <Compile Include="src\util\VpbPerfTelemetry.cs" />
@@ -289,6 +290,8 @@
     <Compile Include="src\perf\VpbPerfSnapshot.cs" />
     <Compile Include="src\perf\VpbPerfController.cs" />
     <Compile Include="src\hook\VpbPerfHairHook.cs" />
+    <Compile Include="src\hook\VpbCatalogRefreshGuard.cs" />
+    <Compile Include="src\hook\VpbCatalogRefreshHook.cs" />
     <Compile Include="src\util\VamStartupProfiler.cs" />
     <Compile Include="src\util\VamStartupOptimizations.cs" />
     <Compile Include="src\util\VpbPackageIndexDiagnostics.cs" />
@@ -310,6 +313,7 @@
     <Compile Include="src\bench\SceneLoadBenchSnapshot.cs" />
     <Compile Include="src\gallery\GalleryPanel.Modal.Bench.cs" />
     <Compile Include="src\gallery\GalleryPanel.Modal.MergeOutfit.cs" />
+    <Compile Include="src\gallery\GalleryPanel.Modal.RemapAtomUids.cs" />
     <Compile Include="src\gallery\GalleryPanel.BenchPickMode.cs" />
     <Compile Include="src\hook\AtomHook.cs" />
     <Compile Include="src\hook\MVRPluginManagerHook.cs" />
@@ -333,6 +337,7 @@
     <Compile Include="src\hook\HubPixelPackingJobs.cs" />
     <Compile Include="src\hook\CustomAssetLoader.cs" />
     <Compile Include="src\hook\GenericTextureHook.cs" />
+    <Compile Include="src\hook\DazCharacterTextureBlendHook.cs" />
     <Compile Include="src\hook\TextureUtil.cs" />
     <Compile Include="src\hook\VaMCompatibleImageDecode.cs" />
     <Compile Include="src\hook\VaMTextureLoadFlags.cs" />
@@ -397,6 +402,7 @@
     <Compile Include="src\gallery\CacheCleanupManager.cs" />
     <Compile Include="src\gallery\index\VpbSqlite3.cs" />
     <Compile Include="src\gallery\index\VpbLocalDatabase.cs" />
+    <Compile Include="src\gallery\index\VpbLocalDatabase.HistoryUsage.cs" />
     <Compile Include="src\gallery\index\VpbLocalDatabase.PackageManifest.cs" />
     <Compile Include="src\gallery\index\VpbLocalDatabase.VarPathInventory.cs" />
     <Compile Include="src\gallery\index\VpbLocalDatabase.GalleryUserTags.cs" />
@@ -404,6 +410,7 @@
     <Compile Include="src\gallery\index\VpbLocalDatabase.GallerySearch.cs" />
     <Compile Include="src\gallery\index\VpbLocalDatabase.FacetTally.cs" />
     <Compile Include="src\gallery\index\VpbLocalDatabase.SceneAtomCache.cs" />
+    <Compile Include="src\gallery\index\VpbLocalDatabase.FilterPresets.cs" />
     <Compile Include="src\gallery\TagsManager.cs" />
     <Compile Include="src\gallery\PosePeopleCountIndex.cs" />
     <Compile Include="src\gallery\GalleryPanel.Actions.cs" />
@@ -422,6 +429,7 @@
     <Compile Include="src\gallery\AppearanceGenderClassifier.cs" />
     <Compile Include="src\gallery\GalleryPanel.AppearanceGenderFacetCounts.cs" />
     <Compile Include="src\gallery\GalleryPanel.AppearanceGenderCache.cs" />
+    <Compile Include="src\gallery\GalleryPanel.AppearanceAutoSpawn.cs" />
     <Compile Include="src\gallery\GalleryPanel.Fields.cs" />
     <Compile Include="src\gallery\GalleryPanel.SettingsInternal.cs" />
     <Compile Include="src\gallery\GalleryPanel.SettingsPerf.cs" />
@@ -442,12 +450,17 @@
     <Compile Include="src\gallery\GalleryPanel.Lifecycle.Init.cs" />
     <Compile Include="src\gallery\GalleryPanel.Lifecycle.Runtime.cs" />
     <Compile Include="src\gallery\GalleryPanel.Lifecycle.Runtime.Update.cs" />
+    <Compile Include="src\gallery\GalleryPanel.StickyTooltip.cs" />
     <Compile Include="src\gallery\GalleryPanel.Transparency.cs" />
     <Compile Include="src\gallery\GalleryPanel.RemoveMode.cs" />
+    <Compile Include="src\gallery\GalleryPanel.ModeAmbient.cs" />
+    <Compile Include="src\gallery\GalleryPanel.CommandPalette.cs" />
     <Compile Include="src\gallery\GalleryPanel.TryOn.cs" />
     <Compile Include="src\gallery\GalleryPanel.DetailStrip.cs" />
     <Compile Include="src\gallery\GalleryPanel.Logic.cs" />
     <Compile Include="src\gallery\GalleryPanel.QuickFilter.cs" />
+    <Compile Include="src\gallery\GalleryPanel.QuickFilter.Active.cs" />
+    <Compile Include="src\gallery\GalleryPanel.FilterRandomizer.cs" />
     <Compile Include="src\gallery\GalleryPanel.CreatorFilter.Multi.cs" />
     <Compile Include="src\gallery\GalleryPanel.CreatorConsolidation.cs" />
     <Compile Include="src\gallery\CreatorNameConsolidation.cs" />
@@ -476,7 +489,6 @@
     <Compile Include="src\gallery\GalleryPanel.TagCategories.cs" />
     <Compile Include="src\gallery\GalleryPanel.ImportSidebar.Chrome.cs" />
     <Compile Include="src\gallery\GalleryPanel.ImportSidebar.Wizard.cs" />
-    <Compile Include="src\gallery\GalleryPanel.ModeSetupWizard.cs" />
     <Compile Include="src\gallery\GalleryPanel.InAppHelp.cs" />
     <Compile Include="src\gallery\GalleryPanel.UI.cs" />
     <Compile Include="src\gallery\GalleryPanel.SceneOverwriteSave.cs" />
@@ -486,11 +498,22 @@
     <Compile Include="src\gallery\GalleryPanel.ContentTypeDescriptor.cs" />
     <Compile Include="src\gallery\GalleryPanel.SideRail.cs" />
     <Compile Include="src\gallery\GalleryPanel.UiScale.cs" />
+    <Compile Include="src\gallery\GalleryUiScaleAutoDetect.cs" />
     <Compile Include="src\gallery\GalleryUiDesignTokens.cs" />
     <Compile Include="src\gallery\GalleryUiMetrics.cs" />
+    <Compile Include="src\gallery\VpbWorldSpaceUiScale.cs" />
+    <Compile Include="src\gallery\GalleryPanel.WorldSpaceScale.cs" />
     <Compile Include="src\gallery\GalleryModalTypography.cs" />
     <Compile Include="src\gallery\GalleryPanel.BrowseFilters.cs" />
+    <Compile Include="src\gallery\GalleryPanel.LicenseFilter.cs" />
     <Compile Include="src\gallery\GalleryPanel.Toolbox.Cleanup.cs" />
+    <Compile Include="src\gallery\GalleryPanel.CreatorMode.cs" />
+    <Compile Include="src\gallery\GalleryPanel.CreatorMode.StripKeep.cs" />
+    <Compile Include="src\gallery\GalleryPanel.CreatorMode.StripKeep.PowerUi.cs" />
+    <Compile Include="src\gallery\GalleryPanel.CreatorMode.StripKeep.Chrome.cs" />
+    <Compile Include="src\gallery\GalleryPanel.CreatorMode.StripKeep.Possess.cs" />
+    <Compile Include="src\gallery\GalleryPanel.CreatorMode.StripKeep.CreateOptions.cs" />
+    <Compile Include="src\gallery\GalleryPanel.CreatorMode.StripKeep.SubScenePick.cs" />
     <Compile Include="src\gallery\GalleryPanel.Toolbox.DeletePackages.cs" />
     <Compile Include="src\gallery\GalleryPanel.Toolbox.DeleteLocalScenes.cs" />
     <Compile Include="src\gallery\GalleryPanel.Toolbox.DeleteLocalPresets.cs" />
@@ -500,6 +523,7 @@
     <Compile Include="src\gallery\GalleryPanel.Toolbox.SceneImport.cs" />
     <Compile Include="src\gallery\GalleryPanel.ImportSidebar.cs" />
     <Compile Include="src\gallery\GalleryPanel.ImportSidebar.UI.cs" />
+    <Compile Include="src\gallery\GalleryPanel.ImportSidebar.Float.cs" />
     <Compile Include="src\gallery\GalleryPanel.ImportSidebar.Atoms.cs" />
     <Compile Include="src\gallery\GalleryPanel.ImportSidebar.Options.cs" />
     <Compile Include="src\gallery\GalleryPanel.QuickMenuExports.cs" />
@@ -508,6 +532,9 @@
     <Compile Include="src\util\CUAConverter.cs" />
     <Compile Include="src\util\CUAAtomImporter.cs" />
     <Compile Include="src\util\SceneAtomImporter.cs" />
+    <Compile Include="src\util\VpbThreePointLightSetup.cs" />
+    <Compile Include="src\util\VpbLoadingIconUtil.cs" />
+    <Compile Include="src\util\VpbCreatorStripPossessable.cs" />
     <Compile Include="src\util\PoseImportDiagnostics.cs" />
     <Compile Include="src\util\GalleryAtomListingDiagnostics.cs" />
     <Compile Include="src\gallery\GallerySortManager.cs" />
@@ -538,9 +565,12 @@
     <Compile Include="src\gallery\PackageListEntry.cs" />
     <Compile Include="src\gallery\QuickFilterSettings.cs" />
     <Compile Include="src\gallery\QuickFiltersUI.cs" />
+    <Compile Include="src\gallery\QuickFiltersUI.Keyboard.cs" />
     <Compile Include="src\gallery\UIColorPicker.cs" />
     <Compile Include="src\gallery\VPBUiPickers.cs" />
     <Compile Include="src\RatingsManager.cs" />
+    <Compile Include="src\CreatorRatingsManager.cs" />
+    <Compile Include="src\gallery\GalleryPanel.CreatorRatings.cs" />
     <Compile Include="src\LocalSceneGallerySupport.cs" />
     <Compile Include="src\PackageHidePrefs.cs" />
     <Compile Include="src\LockedPackagesManager.cs" />
