@@ -1558,14 +1558,12 @@ namespace VPB
             float startY = GetContentScrollTopYForVisibility();
             float endY = startY + viewHeight;
 
-            // Keep only a quarter-row warm. A full extra row is substantial overdraw on wide
-            // fixed panes; async thumbnail binding still starts just before the row is exposed.
-            float warmBand = effectiveItemHeight * 0.25f;
-            startY -= warmBand;
-            endY += warmBand;
-
             int startRow = Mathf.FloorToInt(Mathf.Max(0, startY) / effectiveItemHeight);
-            int endRow = Mathf.CeilToInt(endY / effectiveItemHeight);
+            // Exact viewport culling: do not keep speculative rows alive. CeilToInt used to
+            // retain a complete row below the viewport even with no warm band, which is a large
+            // number of textured UI quads on wide fixed overlays. The tiny epsilon keeps an item
+            // whose lower edge exactly meets the viewport boundary from being counted as visible.
+            int endRow = Mathf.FloorToInt(Mathf.Max(0f, endY - 0.01f) / effectiveItemHeight);
 
             startRow = Mathf.Max(0, startRow);
             endRow = Mathf.Min(rowCount - 1, endRow);

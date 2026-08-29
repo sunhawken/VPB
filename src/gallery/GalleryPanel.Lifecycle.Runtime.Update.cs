@@ -130,12 +130,13 @@ namespace VPB
                 }
                 catch { }
 
-                // Menu ownership/anchors do not need frame-rate polling.  Ten Hz remains
-                // responsive while avoiding repeated Canvas hierarchy walks at 90/120 Hz.
+                // Menu ownership/anchors do not need frame-rate polling. Four Hz is effectively
+                // event-like for this fallback maintenance path and removes nearly all idle
+                // hierarchy walking; direct show/hide actions still update immediately.
                 bool maintainOverlayChrome = Time.unscaledTime >= _nextOverlayChromeMaintenanceTime;
                 if (maintainOverlayChrome)
                 {
-                    _nextOverlayChromeMaintenanceTime = Time.unscaledTime + 0.10f;
+                    _nextOverlayChromeMaintenanceTime = Time.unscaledTime + 0.25f;
                     try { ApplyVamMenuGateVisibility(); } catch { }
                     try { ApplyVamMenuAnchoring(); } catch { }
                 }
