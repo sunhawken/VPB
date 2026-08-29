@@ -522,7 +522,21 @@ namespace VPB
             // so FileExists/GetVarFileEntry miss hooks are not the only path for meta-only deps.
             // Queue coalesced catalog refresh only when this coroutine will not run an explicit
             // bridge refresh; FinalizeSceneLoadCleanup drains any pending coalesced refresh.
-            if (ScanWhitelistManager.Instance.IsEnabled)
+            // A scene inside a .DISABLED archive must prewarm regardless of whitelist state. The
+            // whitelist gate assumed that with scanning unrestricted VaM has already registered
+            // every package, which holds for .var but never for .DISABLED — VaM cannot register
+            // those at all (its uid parser rejects the fourth name segment), so without this the
+            // host package is never activated and "Package.uid:/Saves/scene/x.json" resolves to
+            // nothing the moment the whitelist is off.
+            bool hostNeedsOnDemand = false;
+            try
+            {
+                if (entry is VarFileEntry hostVfe && hostVfe.Package != null)
+                    hostNeedsOnDemand = VamOnDemandLoader.IsDisabledArchivePath(hostVfe.Package.Path);
+            }
+            catch { }
+
+            if (ScanWhitelistManager.Instance.IsEnabled || hostNeedsOnDemand)
             {
                 try
                 {
