@@ -657,6 +657,18 @@ namespace VPB
                 LogUtil.LogWarning("[VPB] Scene rewrite skipped due to error: " + ex.Message);
             }
 
+            // Last gate before the load runs. Every native Refresh above unregisters (and
+            // permanently disposes) each on-demand package whose Path its AddonPackages sweep did
+            // not enumerate, which is all of them - the links live outside that tree by design.
+            // The deferred drain would repair this, but only on a later frame, and the scene load
+            // starts before that. Re-verify synchronously here so a scene whose whole dependency
+            // tree is .DISABLED is fully registered at the moment VaM begins reading it.
+            try { VamOnDemandLoader.ReverifyOnDemandRegistrations(); }
+            catch (Exception ex)
+            {
+                LogUtil.LogWarning("[VPB OnDemand] Pre-load re-registration failed: " + ex.Message);
+            }
+
             LogUtil.Log("[VPB] Normalized path: " + normalizedPath);
             outcome.NormalizedPath = normalizedPath;
             outcome.Success = true;
