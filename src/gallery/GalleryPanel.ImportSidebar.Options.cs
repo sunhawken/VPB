@@ -2045,6 +2045,13 @@ namespace VPB
             string sourceHostUid = (importSidebarSourceScene is VarFileEntry sceneVar && sceneVar.Package != null)
                 ? sceneVar.Package.Uid : null;
 
+            // Restore the dependency-complete behavior of the legacy Appearance importer. The
+            // upstream sidebar normally prepares only each filtered Person slice. That is fast,
+            // but it can omit packages referenced by sibling atoms, plugin metadata, or the host
+            // package's declared transitive dependency graph. Prepare the complete source once
+            // before any type is applied; the per-slice path below remains as a cheap safety net.
+            PrepareImportSidebarSourceDependencies(sourceHostUid);
+
             // Apply each selected AVAILABLE type in sequence, EXCEPT Pose. Paused (0-count) types are skipped.
             // Pose deferred until other types settle (scale/morphs).
             bool hasPose = importSidebarMultiSelectedTypes.Contains(VpbResourceType.Pose)
@@ -2077,6 +2084,34 @@ namespace VPB
                     RunCUAImportWithOptionalDelete(importCUAsStandalone);
                 if (importSceneAtoms)
                     StartImportSelectedSceneAtoms(sourceHostUid);
+            }
+        }
+
+        private void PrepareImportSidebarSourceDependencies(string sourceHostUid)
+        {
+            if (importSidebarSourceScene == null) return;
+
+            try
+            {
+                var movedUids = new List<string>(32);
+                bool moved = UI.EnsureInstalled(importSidebarSourceScene, movedUids);
+                int attempted = SceneLoadingUtils.PrewarmOnDemandPackagesForEntry(
+                    importSidebarSourceScene,
+                    !string.IsNullOrEmpty(sourceHostUid) ? sourceHostUid : importSidebarSourceScene.Uid,
+                    queueCoalescedRefresh: true);
+
+                bool refreshed = VamOnDemandLoader.ForceRunPendingCoalescedVamRefresh(
+                    "vpb_import_atom_full_dependency_flush");
+                LogUtil.Log("[VPB import] Full source dependency prep complete: attempted=" + attempted
+                    + " moved=" + movedUids.Count
+                    + " changed=" + (moved ? 1 : 0)
+                    + " refreshed=" + (refreshed ? 1 : 0));
+            }
+            catch (System.Exception ex)
+            {
+                // Keep the existing slice-specific path available if one malformed package fails
+                // full-tree preparation; importing the usable parts is preferable to a no-op.
+                LogUtil.LogWarning("[VPB import] Full source dependency prep failed: " + ex.Message);
             }
         }
 
