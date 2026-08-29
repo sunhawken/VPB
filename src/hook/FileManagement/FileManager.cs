@@ -3908,10 +3908,6 @@ namespace VPB
 			}
 		}
 
-		/// <summary>Folder name (not path) of the on-demand hard-link directory, skipped by every
-		/// package sweep so activated .DISABLED archives are never listed twice.</summary>
-		internal const string OnDemandLinkDirectoryName = ".vpb-ondemand";
-
 		public static void SafeGetFiles(string path, string pattern, List<string> results)
 		{
 			SafeGetFiles(path, pattern, results, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
@@ -3943,12 +3939,6 @@ namespace VPB
 					{
 						// Skip InvalidPackages to avoid re-scanning rejected files
 						if (Path.GetFileName(dir).Equals("InvalidPackages", StringComparison.OrdinalIgnoreCase)) continue;
-
-						// Skip the on-demand hard-link directory. Those links are second directory
-						// entries for .DISABLED archives that are already listed from their real
-						// location; indexing them too would show every activated package twice and
-						// show it as enabled.
-						if (Path.GetFileName(dir).Equals(OnDemandLinkDirectoryName, StringComparison.OrdinalIgnoreCase)) continue;
 
 						SafeGetFiles(dir, pattern, results, visited);
 					}
