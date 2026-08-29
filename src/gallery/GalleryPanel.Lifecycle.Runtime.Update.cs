@@ -291,15 +291,29 @@ namespace VPB
 
                     // Update fixed geometry only when its inputs change. RectTransform writes and
                     // handle maintenance can otherwise force Canvas rebuild work every frame.
-                    string fixedLayoutKey = dock + "|" + Screen.width + "x" + Screen.height + "|"
-                        + VPBConfig.Instance.DesktopCustomWidth.ToString("R") + "|"
-                        + VPBConfig.Instance.DesktopFixedHeightMode + "|"
-                        + VPBConfig.Instance.DesktopCustomHeight.ToString("R") + "|"
-                        + (isCollapsed ? "1" : "0");
-                    bool fixedLayoutDirty = fixedLayoutKey != _lastFixedOverlayLayoutKey;
+                    int screenW = Screen.width;
+                    int screenH = Screen.height;
+                    float cfgCustomWidth = VPBConfig.Instance.DesktopCustomWidth;
+                    int cfgHeightMode = VPBConfig.Instance.DesktopFixedHeightMode;
+                    float cfgCustomHeight = VPBConfig.Instance.DesktopCustomHeight;
+                    bool fixedLayoutDirty = !_fixedOverlayLayoutKeyValid
+                        || !string.Equals(dock, _lastFixedOverlayDock, StringComparison.Ordinal)
+                        || screenW != _lastFixedOverlayScreenW
+                        || screenH != _lastFixedOverlayScreenH
+                        || cfgCustomWidth != _lastFixedOverlayCustomWidth
+                        || cfgHeightMode != _lastFixedOverlayHeightMode
+                        || cfgCustomHeight != _lastFixedOverlayCustomHeight
+                        || isCollapsed != _lastFixedOverlayCollapsed;
                     if (fixedLayoutDirty)
                     {
-                        _lastFixedOverlayLayoutKey = fixedLayoutKey;
+                        _fixedOverlayLayoutKeyValid = true;
+                        _lastFixedOverlayDock = dock;
+                        _lastFixedOverlayScreenW = screenW;
+                        _lastFixedOverlayScreenH = screenH;
+                        _lastFixedOverlayCustomWidth = cfgCustomWidth;
+                        _lastFixedOverlayHeightMode = cfgHeightMode;
+                        _lastFixedOverlayCustomHeight = cfgCustomHeight;
+                        _lastFixedOverlayCollapsed = isCollapsed;
 
                     // Update anchors in Fixed mode when settings, collapse state, or screen size changes.
                     RectTransform bgRT = _backgroundBoxRT;

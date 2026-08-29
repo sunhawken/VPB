@@ -1184,9 +1184,23 @@ namespace VPB
             Canvas.willRenderCanvases += ScrollFlushBeforeRender;
         }
 
+        /// <summary>Own RectTransform, resolved once. Update() ran GetComponent every frame for a
+        /// value it only reads when <see cref="viewport"/> is null.</summary>
+        private RectTransform _selfRT;
+
+        private RectTransform SelfRT
+        {
+            get
+            {
+                if (_selfRT == null) _selfRT = GetComponent<RectTransform>();
+                return _selfRT;
+            }
+        }
+
         private void Awake()
         {
             if (_scrollRect == null) scrollRect = GetComponent<ScrollRect>();
+            _selfRT = GetComponent<RectTransform>();
             _needsLayoutUpdate = true;
         }
 
@@ -1195,8 +1209,9 @@ namespace VPB
             // Adaptive relayout must not run on tiny viewport width noise: RecalculateLayout() ends in
             // Refresh() -> RecycleAll(), which drops the visible-range cache and re-binds every cell
             // — main cause of grid scroll jitter when rect.width fluctuates 1–2px per frame.
-            RectTransform rt = GetComponent<RectTransform>();
-            float usableWidth = viewport != null ? viewport.rect.width : (rt != null ? rt.rect.width : 0);
+            float usableWidth;
+            if (viewport != null) usableWidth = viewport.rect.width;
+            else { RectTransform rt = SelfRT; usableWidth = rt != null ? rt.rect.width : 0; }
 
             if (isAdaptive)
             {
@@ -1296,8 +1311,8 @@ namespace VPB
         private void RecalculateLayout(bool deferFinalRefresh = false)
         {
             if (content == null) return;
-            
-            RectTransform rt = GetComponent<RectTransform>();
+
+            RectTransform rt = SelfRT;
             if (rt == null) return;
             
             // Priority: Viewport width (actual visible area)

@@ -45,7 +45,7 @@ namespace VPB
                     }
                     if (backgroundBoxGO != null)
                     {
-                        Image bgImg = backgroundBoxGO.GetComponent<Image>();
+                        Image bgImg = GetCachedGraphicImage(backgroundBoxGO, ref _backgroundBoxImage);
                         if (bgImg != null && bgImg.color != backgroundColor) bgImg.color = backgroundColor;
                     }
                 }
@@ -63,25 +63,40 @@ namespace VPB
             try { ApplyGalleryDockHoverVisuals(); } catch { }
         }
 
+        /// <summary>
+        /// Resolves an <see cref="Image"/> once per owning GameObject instead of per frame.
+        /// The dock/transparency pass runs every Update while the pane is open; the eight
+        /// GetComponent calls it used to make were pure managed-to-native overhead.
+        /// </summary>
+        private Image GetCachedGraphicImage(GameObject go, ref Image cache)
+        {
+            if (go == null) { cache = null; return null; }
+            if (cache == null || cache.gameObject != go)
+                cache = go.GetComponent<Image>();
+            return cache;
+        }
+
         private void ApplyGalleryDockHoverVisuals()
         {
             // Side rails: invisible hit targets only (buttons are independent visuals, no panel backdrop).
-            ApplyGallerySideHoverHitArea(leftSideHoverStrip);
-            ApplyGallerySideHoverHitArea(rightSideHoverStrip);
-            ApplyGallerySideHoverHitArea(leftSideContainer);
-            ApplyGallerySideHoverHitArea(rightSideContainer);
+            ApplyGallerySideHoverHitArea(leftSideHoverStrip, ref _leftSideHoverStripImage);
+            ApplyGallerySideHoverHitArea(rightSideHoverStrip, ref _rightSideHoverStripImage);
+            ApplyGallerySideHoverHitArea(leftSideContainer, ref _leftSideContainerImage);
+            ApplyGallerySideHoverHitArea(rightSideContainer, ref _rightSideContainerImage);
 
-            ApplyCollapseTriggerVisual(collapseTriggerGO, collapseHandleText);
-            ApplyCollapseTriggerVisual(collapseTriggerLeftGO, collapseHandleLeftText);
-            ApplyCollapseTriggerVisual(collapseTriggerTopGO, collapseHandleTopText);
+            // Dock-hover opacity is one config read, not one per trigger.
+            bool dockOpaque = VPBConfig.Instance != null && VPBConfig.Instance.ShouldDisableGalleryDockHoverTransparency();
+            ApplyCollapseTriggerVisual(collapseTriggerGO, collapseHandleText, dockOpaque, ref _collapseTriggerImage);
+            ApplyCollapseTriggerVisual(collapseTriggerLeftGO, collapseHandleLeftText, dockOpaque, ref _collapseTriggerLeftImage);
+            ApplyCollapseTriggerVisual(collapseTriggerTopGO, collapseHandleTopText, dockOpaque, ref _collapseTriggerTopImage);
         }
 
-        private static void ApplyGallerySideHoverHitArea(GameObject go)
+        private void ApplyGallerySideHoverHitArea(GameObject go, ref Image cache)
         {
-            if (go == null) return;
+            if (go == null) { cache = null; return; }
             try
             {
-                Image img = go.GetComponent<Image>();
+                Image img = GetCachedGraphicImage(go, ref cache);
                 if (img == null) return;
                 if (img.color != SideHoverHitAreaInvisible) img.color = SideHoverHitAreaInvisible;
                 if (!img.raycastTarget) img.raycastTarget = true;
@@ -93,13 +108,12 @@ namespace VPB
             catch { }
         }
 
-        private void ApplyCollapseTriggerVisual(GameObject trigger, Text handleText)
+        private void ApplyCollapseTriggerVisual(GameObject trigger, Text handleText, bool opaque, ref Image cache)
         {
-            if (trigger == null) return;
-            bool opaque = VPBConfig.Instance != null && VPBConfig.Instance.ShouldDisableGalleryDockHoverTransparency();
+            if (trigger == null) { cache = null; return; }
             try
             {
-                Image img = trigger.GetComponent<Image>();
+                Image img = GetCachedGraphicImage(trigger, ref cache);
                 if (img != null)
                 {
                     Color collapsedColor = opaque ? CollapseTriggerCollapsedOpaque : CollapseTriggerCollapsedTransparent;
