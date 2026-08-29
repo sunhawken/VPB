@@ -1211,7 +1211,26 @@ namespace VPB
         // Fixed desktop chrome is static most frames.  Reapplying menu anchors and dock
         // geometry every Update dirties Unity's Canvas hierarchy and is a large idle cost.
         private float _nextOverlayChromeMaintenanceTime;
-        private string _lastFixedOverlayLayoutKey;
+        // Fixed-overlay layout inputs, compared field-by-field instead of via a composed string
+        // key.  Building that key cost two float.ToString("R") calls plus several concats every
+        // frame the pane was open in fixed mode, purely to discover that nothing had changed.
+        private bool _fixedOverlayLayoutKeyValid;
+        private string _lastFixedOverlayDock;
+        private int _lastFixedOverlayScreenW;
+        private int _lastFixedOverlayScreenH;
+        private float _lastFixedOverlayCustomWidth;
+        private int _lastFixedOverlayHeightMode;
+        private float _lastFixedOverlayCustomHeight;
+        private bool _lastFixedOverlayCollapsed;
+        /// <summary>Cached transparency-pass graphics — avoid GetComponent every frame.</summary>
+        private Image _backgroundBoxImage;
+        private Image _leftSideHoverStripImage;
+        private Image _rightSideHoverStripImage;
+        private Image _leftSideContainerImage;
+        private Image _rightSideContainerImage;
+        private Image _collapseTriggerImage;
+        private Image _collapseTriggerLeftImage;
+        private Image _collapseTriggerTopImage;
         private GameObject footerBackBtn;
         private GameObject footerClearFilterBtn;
         private Text footerFilterModeText;
