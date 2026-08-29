@@ -2020,6 +2020,53 @@ namespace VPB
         /// packages — the expensive I/O is skipped entirely, not just cleaned up afterward.
         /// On-demand registration (via VamOnDemandLoader) bypasses this via s_AllowRegistration.
         /// </summary>
+        // VarPackage.Dispose is terminal: it closes the archive AND clears _zipFileLazyInit, and the
+        // ZipFile getter only reopens while that flag is set. Every VarFileEntry still pointing at
+        // the package then fails forever with "Could not get ZipFile for package" - which is what
+        // broke plugin script compiles, since VaM reads the .cs out of the package at compile time.
+        // Re-arm the flag when the archive is still on disk, so a disposed-but-referenced package
+        // reopens itself instead of staying dead for the rest of the session.
+        private static System.Reflection.FieldInfo s_VpZipFileField;
+        private static System.Reflection.FieldInfo s_VpZipLazyField;
+        private static bool s_VpZipFieldsResolved;
+
+        [HarmonyPrefix]
+        [HarmonyPatch(typeof(MVR.FileManagement.VarPackage), "get_ZipFile")]
+        public static void PreVarPackageZipFileRearm(MVR.FileManagement.VarPackage __instance)
+        {
+            try
+            {
+                if (__instance == null) return;
+
+                if (!s_VpZipFieldsResolved)
+                {
+                    s_VpZipFieldsResolved = true;
+                    var t = typeof(MVR.FileManagement.VarPackage);
+                    const System.Reflection.BindingFlags F =
+                        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                    s_VpZipFileField = t.GetField("_zipFile", F);
+                    s_VpZipLazyField = t.GetField("_zipFileLazyInit", F);
+                    if (s_VpZipFileField == null || s_VpZipLazyField == null)
+                        LogUtil.LogWarning("[VPB] VarPackage zip fields not found; disposed-package recovery disabled.");
+                }
+                if (s_VpZipFileField == null || s_VpZipLazyField == null) return;
+
+                // Only act on the dead combination: no zip and no pending lazy open.
+                if (s_VpZipFileField.GetValue(__instance) != null) return;
+                object lazy = s_VpZipLazyField.GetValue(__instance);
+                if (lazy is bool && (bool)lazy) return;
+
+                string path = __instance.Path;
+                if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path)) return;
+
+                s_VpZipLazyField.SetValue(__instance, true);
+                VpbZipRearmCount++;
+            }
+            catch { }
+        }
+
+        internal static long VpbZipRearmCount;
+
         [HarmonyPrefix]
         [HarmonyPatch(typeof(MVR.FileManagement.FileManager), "RegisterPackage")]
         public static bool PreRegisterPackageScanFilter(string __0)
