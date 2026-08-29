@@ -625,6 +625,19 @@ namespace VPB
                 yield return new WaitForSeconds(1.0f);
             }
 
+            // A CUA can reference shaders, textures, plugins and other asset bundles from its
+            // host package's declared dependency tree. Registration must happen for the normal
+            // button path too, not only when Scan Whitelist is enabled.
+            try
+            {
+                SceneLoadingUtils.PrewarmOnDemandPackagesForEntry(FileEntry, path, queueCoalescedRefresh: true);
+                VamOnDemandLoader.ForceRunPendingCoalescedVamRefresh("cua_button_dependency_flush");
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogWarning("[VPB] LoadCUA: dependency prep failed: " + ex.Message);
+            }
+
             // Refresh atom reference
             Atom targetAtom = SuperController.singleton.GetAtomByUid(atomUid);
             if (targetAtom == null)
@@ -715,6 +728,16 @@ namespace VPB
             }
 
             string normalizedPath = UI.NormalizePath(path);
+
+            try
+            {
+                SceneLoadingUtils.PrewarmOnDemandPackagesForEntry(FileEntry, normalizedPath, queueCoalescedRefresh: true);
+                VamOnDemandLoader.ForceRunPendingCoalescedVamRefresh("subscene_button_dependency_flush");
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogWarning("[VPB] LoadSubScene: dependency prep failed: " + ex.Message);
+            }
 
             LogUtil.Log($"[VPB] LoadSubScene: {normalizedPath}");
 
@@ -830,18 +853,16 @@ namespace VPB
                 return;
             }
 
-            // Plugin preset (.vap): register package under scan whitelist before PluginPresets apply.
-            if (ScanWhitelistManager.Instance.IsEnabled)
+            // Plugin preset (.vap): register its complete tree before PluginPresets applies it.
+            // This is intentionally independent of persistent Scan Whitelist mode.
+            try
             {
-                try
-                {
-                    SceneLoadingUtils.PrewarmOnDemandPackagesForEntry(FileEntry, FileEntry != null ? FileEntry.Uid : null);
-                    VamOnDemandLoader.ForceRunPendingCoalescedVamRefresh("plugin_preset_prewarm_flush");
-                }
-                catch (Exception ex)
-                {
-                    LogUtil.LogWarning("[VPB] LoadPlugins: preset prewarm failed: " + ex.Message);
-                }
+                SceneLoadingUtils.PrewarmOnDemandPackagesForEntry(FileEntry, FileEntry != null ? FileEntry.Uid : null);
+                VamOnDemandLoader.ForceRunPendingCoalescedVamRefresh("plugin_preset_prewarm_flush");
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogWarning("[VPB] LoadPlugins: preset prewarm failed: " + ex.Message);
             }
             ApplyClothingToAtom(target, FileEntry.Uid);
         }
@@ -900,20 +921,17 @@ namespace VPB
                 return;
             }
 
-            if (ScanWhitelistManager.Instance.IsEnabled)
+            try
             {
-                try
-                {
-                    // Persist UID override for script packages (same policy as FileExists on-demand hook).
-                    SceneLoadingUtils.PrewarmOnDemandPackagesForEntry(entry, pluginUrl, queueCoalescedRefresh: true);
-                    VamOnDemandLoader.TryRegisterPackageOnDemandForEntryPath(pluginUrl);
-                    pluginUrl = VamOnDemandLoader.RewriteEntryPathToBestAvailable(pluginUrl, attemptRegister: true);
-                    VamOnDemandLoader.ForceRunPendingCoalescedVamRefresh("plugin_script_prewarm_flush");
-                }
-                catch (Exception ex)
-                {
-                    LogUtil.LogWarning("[VPB] LoadPlugins: on-demand register failed: " + ex.Message);
-                }
+                // Persist UID override for script packages (same policy as FileExists on-demand hook).
+                SceneLoadingUtils.PrewarmOnDemandPackagesForEntry(entry, pluginUrl, queueCoalescedRefresh: true);
+                VamOnDemandLoader.TryRegisterPackageOnDemandForEntryPath(pluginUrl);
+                pluginUrl = VamOnDemandLoader.RewriteEntryPathToBestAvailable(pluginUrl, attemptRegister: true);
+                VamOnDemandLoader.ForceRunPendingCoalescedVamRefresh("plugin_script_prewarm_flush");
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogWarning("[VPB] LoadPlugins: on-demand register failed: " + ex.Message);
             }
 
             MVRPluginManager mgr = null;
@@ -1039,10 +1057,14 @@ namespace VPB
             string normalizedPath = UI.NormalizePath(FileEntry.Path);
             LogUtil.Log($"[VPB] LoadPose: Applying {FileEntry.Name} to {target.uid} (SuppressRoot: {suppressRoot})");
 
-            if (ScanWhitelistManager.Instance.IsEnabled)
+            try
             {
-                try { SceneLoadingUtils.PrewarmOnDemandPackagesForEntry(FileEntry, normalizedPath); }
-                catch { }
+                SceneLoadingUtils.PrewarmOnDemandPackagesForEntry(FileEntry, normalizedPath);
+                VamOnDemandLoader.ForceRunPendingCoalescedVamRefresh("pose_button_dependency_flush");
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogWarning("[VPB] LoadPose: dependency prep failed: " + ex.Message);
             }
 
             // Use LoadJSONWithFallback instead of SuperController.LoadJSON directly:
