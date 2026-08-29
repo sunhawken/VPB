@@ -56,15 +56,64 @@ namespace VPB
         /// In-memory lookup against VPB's own package index (ensureInstalled: false) — safe to call
         /// from hot miss-hooks, which is why callers must not resolve this by touching the disk.
         /// </summary>
+        // Prebuilt lookup of which packages are .DISABLED. The six native resolution hooks consult
+        // this on every miss - thousands of times per Refresh - and a library can hold 18k+ archives,
+        // so it must be a hash lookup. The first implementation called FileManager.GetPackage, which
+        // runs a Regex per call; that was affordable at a hundred packages and is not at eighteen
+        // thousand. Rebuilt only when the package count changes.
+        private static readonly object s_DisabledSetLock = new object();
+        private static HashSet<string> s_DisabledUids;
+        private static HashSet<string> s_DisabledGroups;
+        private static int s_DisabledSetPkgCount = -1;
+
+        private static void EnsureDisabledSets()
+        {
+            Dictionary<string, VarPackage> dict = FileManager.PackagesByUid;
+            if (dict == null) return;
+            int count = dict.Count;
+            if (s_DisabledUids != null && count == s_DisabledSetPkgCount) return;
+
+            lock (s_DisabledSetLock)
+            {
+                if (s_DisabledUids != null && count == s_DisabledSetPkgCount) return;
+                var uids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var groups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                try
+                {
+                    lock (FileManager.packagesLock)
+                    {
+                        foreach (KeyValuePair<string, VarPackage> kv in dict)
+                        {
+                            VarPackage p = kv.Value;
+                            if (p == null || !IsDisabledArchivePath(p.Path)) continue;
+                            uids.Add(kv.Key);
+                            int lastDot = kv.Key.LastIndexOf('.');
+                            if (lastDot > 0) groups.Add(kv.Key.Substring(0, lastDot));
+                        }
+                    }
+                }
+                catch { return; }
+                s_DisabledUids = uids;
+                s_DisabledGroups = groups;
+                s_DisabledSetPkgCount = count;
+                LogUtil.Log("[VPB OnDemand] Disabled-package lookup built: " + uids.Count
+                    + " uid(s), " + groups.Count + " group(s) of " + count + " package(s).");
+            }
+        }
+
         internal static bool IsKnownDisabledPackageUid(string uid)
         {
             if (string.IsNullOrEmpty(uid)) return false;
-            try
+            EnsureDisabledSets();
+            HashSet<string> uids = s_DisabledUids;
+            if (uids == null) return false;
+            if (uids.Contains(uid)) return true;
+            if (uid.EndsWith(".latest", StringComparison.OrdinalIgnoreCase))
             {
-                VarPackage pkg = FileManager.GetPackage(uid, false);
-                return pkg != null && IsDisabledArchivePath(pkg.Path);
+                HashSet<string> groups = s_DisabledGroups;
+                return groups != null && groups.Contains(uid.Substring(0, uid.Length - 7));
             }
-            catch { return false; }
+            return false;
         }
 
         /// <summary>
@@ -75,7 +124,9 @@ namespace VPB
         {
             if (string.IsNullOrEmpty(groupUid)) return false;
             if (groupUid.IndexOf(':') >= 0) return false;
-            return IsKnownDisabledPackageUid(groupUid + ".latest");
+            EnsureDisabledSets();
+            HashSet<string> groups = s_DisabledGroups;
+            return groups != null && groups.Contains(groupUid);
         }
 
         /// <summary>
