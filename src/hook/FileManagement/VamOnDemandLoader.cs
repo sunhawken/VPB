@@ -22,6 +22,135 @@ namespace VPB
     /// </summary>
     internal static class VamOnDemandLoader
     {
+        #region .DISABLED registration shim
+
+        // VaM's FileManager.RegisterPackage derives the package uid straight from the filename:
+        //     packagePathToUid = Regex.Replace(path, "\\.(var|zip)$", "")  →  split('.')  →  must be 3 segments
+        // A ".../Creator.Package.1.DISABLED" path therefore yields FOUR segments, so VaM logs
+        // "VAR file ... is not named with convention <creator>.<name>.<version>" and registers
+        // nothing — after which every item inside that package resolves as missing.
+        //
+        // VaM only ever needs a path that (a) parses to a 3-segment uid and (b) opens as a zip.
+        // We give it an NTFS hard link named "<uid>.var" that points at the very same bytes as
+        // the .DISABLED archive. The user's file is never renamed, moved or copied: a hard link
+        // is just a second directory entry for one inode. The links live outside AddonPackages so
+        // VaM's own startup scan never sees them and nothing becomes permanently enabled.
+        //
+        // VarPackage.Enabled is "!FileExists(Path + \".disabled\")", which does not depend on the
+        // package living under AddonPackages, so a package registered from the link directory
+        // still indexes its file entries normally.
+
+        private const string OnDemandLinkDirectory = "Cache/VPB/ondemand";
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+        [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+        private static extern bool CreateHardLinkW(string lpFileName, string lpExistingFileName, IntPtr lpSecurityAttributes);
+
+        private static readonly object s_LinkLock = new object();
+        private static readonly Dictionary<string, string> s_LinkByArchivePath =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private static int s_LinkFailureLogged;
+
+        internal static bool IsDisabledArchivePath(string path)
+        {
+            return !string.IsNullOrEmpty(path)
+                && path.EndsWith(".DISABLED", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Returns a path VaM's RegisterPackage can actually parse. Non-.DISABLED archives pass
+        /// straight through. For a .DISABLED archive this returns a hard link named
+        /// "&lt;uid&gt;.var", creating it on first use and reusing it for the rest of the session.
+        /// Returns null only when no registrable path could be produced.
+        /// </summary>
+        internal static string ResolveRegistrablePackagePath(string archivePath, string uid)
+        {
+            if (string.IsNullOrEmpty(archivePath)) return archivePath;
+            if (!IsDisabledArchivePath(archivePath)) return archivePath;
+
+            if (string.IsNullOrEmpty(uid)) uid = UidFromVarPath(archivePath);
+            if (string.IsNullOrEmpty(uid))
+            {
+                LogUtil.LogWarning("[VPB OnDemand] Cannot derive uid for disabled archive " + archivePath);
+                return null;
+            }
+
+            lock (s_LinkLock)
+            {
+                string cached;
+                if (s_LinkByArchivePath.TryGetValue(archivePath, out cached))
+                {
+                    if (!string.IsNullOrEmpty(cached) && File.Exists(cached)) return cached;
+                    s_LinkByArchivePath.Remove(archivePath);
+                }
+
+                try
+                {
+                    if (!File.Exists(archivePath))
+                    {
+                        LogUtil.LogWarning("[VPB OnDemand] Disabled archive vanished before registration: " + archivePath);
+                        return null;
+                    }
+
+                    Directory.CreateDirectory(OnDemandLinkDirectory);
+                    string linkPath = NormalizePath(Path.Combine(OnDemandLinkDirectory, uid + ".var"));
+
+                    // A stale link from an earlier session may point at an archive that has since
+                    // moved. Drop it and relink rather than registering the wrong bytes.
+                    if (File.Exists(linkPath) && !SameFileOnDisk(linkPath, archivePath))
+                    {
+                        try { File.Delete(linkPath); }
+                        catch (Exception ex)
+                        {
+                            LogUtil.LogWarning("[VPB OnDemand] Could not replace stale link " + linkPath + ": " + ex.Message);
+                            return null;
+                        }
+                    }
+
+                    if (!File.Exists(linkPath))
+                    {
+                        string existingFull = Path.GetFullPath(archivePath);
+                        string linkFull = Path.GetFullPath(linkPath);
+                        if (!CreateHardLinkW(linkFull, existingFull, IntPtr.Zero))
+                        {
+                            int err = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+                            if (Interlocked.Increment(ref s_LinkFailureLogged) <= 8)
+                            {
+                                LogUtil.LogWarning("[VPB OnDemand] Hard link failed (win32=" + err + ") for "
+                                    + archivePath + ". Disabled packages can only be registered when the link "
+                                    + "directory is on the same NTFS volume as the archive.");
+                            }
+                            return null;
+                        }
+                    }
+
+                    s_LinkByArchivePath[archivePath] = linkPath;
+                    return linkPath;
+                }
+                catch (Exception ex)
+                {
+                    if (Interlocked.Increment(ref s_LinkFailureLogged) <= 8)
+                        LogUtil.LogWarning("[VPB OnDemand] Link setup failed for " + archivePath + ": " + ex.Message);
+                    return null;
+                }
+            }
+        }
+
+        /// <summary>True when both paths resolve to the same on-disk file (hard link check).</summary>
+        private static bool SameFileOnDisk(string a, string b)
+        {
+            try
+            {
+                string idA, idB;
+                if (FileManager.TryGetWindowsFileId(a, out idA) && FileManager.TryGetWindowsFileId(b, out idB))
+                    return string.Equals(idA, idB, StringComparison.Ordinal);
+            }
+            catch { }
+            return false;
+        }
+
+        #endregion
+
         private static bool IsPluginEntryPath(string entryPath)
         {
             if (string.IsNullOrEmpty(entryPath)) return false;
@@ -2046,8 +2175,19 @@ namespace VPB
                 return;
             }
 
+            // A .DISABLED archive cannot be handed to VaM directly — its filename has a fourth
+            // segment and VaM's uid parser rejects it outright. Swap in a hard link named
+            // "<uid>.var" that points at the same bytes; the archive itself is left alone.
+            string registrablePath = ResolveRegistrablePackagePath(varPath, uid);
+            if (string.IsNullOrEmpty(registrablePath))
+            {
+                lock (s_FailedLock)
+                    s_LastFailedAttemptTicksByUid[uid] = DateTime.UtcNow.Ticks;
+                return;
+            }
+
             var sw = Stopwatch.StartNew();
-            bool ok = VamScanFilter.TryRegisterVarInVam(varPath);
+            bool ok = VamScanFilter.TryRegisterVarInVam(registrablePath);
             sw.Stop();
             long elapsedMs = sw.ElapsedMilliseconds;
             lock (s_StartupStatsLock)
