@@ -101,6 +101,26 @@ namespace VPB
             }
         }
 
+        /// <summary>Republishes the lock-free read snapshot. Callers must hold s_RegisteredLock.</summary>
+        private static void PublishRegisteredSnapshot()
+        {
+            s_RegisteredSnapshot = new HashSet<string>(s_RegisteredOnDemand, StringComparer.OrdinalIgnoreCase);
+        }
+
+        /// <summary>True when this uid was registered by the on-demand loader this session.</summary>
+        internal static bool IsOnDemandRegistered(string uid)
+        {
+            if (string.IsNullOrEmpty(uid)) return false;
+            // Lock-free on purpose. This runs from the UnregisterPackage prefix, which VaM calls
+            // thousands of times per Refresh sweep; taking a lock there produced a storm of
+            // MissingMethodException: System.Threading.Monitor.Enter (the net35 reference
+            // assemblies are absent on this machine, so lock emits the .NET 4 two-argument
+            // overload that Mono's mscorlib does not have). Reads use an immutable snapshot
+            // published by the writers below, so no lock is needed.
+            HashSet<string> snap = s_RegisteredSnapshot;
+            return snap != null && snap.Contains(uid);
+        }
+
         internal static bool IsKnownDisabledPackageUid(string uid)
         {
             if (string.IsNullOrEmpty(uid)) return false;
@@ -817,6 +837,8 @@ namespace VPB
         // MUST be invalidated when native FileManager.Refresh completes under scan whitelist —
         // VaM drops non-whitelisted packages, and stale entries here permanently skip re-register
         // (Missing addon package spam until full VPB ClearCache). See issue #77.
+        /// <summary>Copy-on-write snapshot of <see cref="s_RegisteredOnDemand"/> for lock-free reads.</summary>
+        private static volatile HashSet<string> s_RegisteredSnapshot = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static readonly HashSet<string> s_RegisteredOnDemand =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static readonly object s_RegisteredLock = new object();
@@ -988,6 +1010,7 @@ namespace VPB
         {
             lock (s_RegisteredLock)
                 s_RegisteredOnDemand.Clear();
+                PublishRegisteredSnapshot();
             lock (s_FailedLock)
                 s_LastFailedAttemptTicksByUid.Clear();
             lock (s_StartupStatsLock)
@@ -1078,6 +1101,7 @@ namespace VPB
         {
             lock (s_RegisteredLock)
                 s_RegisteredOnDemand.Clear();
+                PublishRegisteredSnapshot();
             lock (s_FailedLock)
                 s_LastFailedAttemptTicksByUid.Clear();
             // Keep s_MorphIngestCompletedUids across skip-morph clothing refreshes — clearing it
@@ -1099,6 +1123,7 @@ namespace VPB
             if (IsUidAlreadyRegisteredInVam(uid)) return true;
             lock (s_RegisteredLock)
                 s_RegisteredOnDemand.Remove(uid);
+                PublishRegisteredSnapshot();
             return false;
         }
 
@@ -1890,6 +1915,7 @@ namespace VPB
             {
                 lock (s_RegisteredLock)
                     s_RegisteredOnDemand.Add(resolvedUid);
+                    PublishRegisteredSnapshot();
                 return null;
             }
 
@@ -2275,6 +2301,7 @@ namespace VPB
             {
                 lock (s_RegisteredLock)
                     s_RegisteredOnDemand.Add(uid);
+                    PublishRegisteredSnapshot();
                 lock (s_FailedLock)
                     s_LastFailedAttemptTicksByUid.Remove(uid);
                 return;
@@ -2316,6 +2343,7 @@ namespace VPB
             {
                 lock (s_RegisteredLock)
                     s_RegisteredOnDemand.Add(uid);
+                    PublishRegisteredSnapshot();
                 lock (s_FailedLock)
                     s_LastFailedAttemptTicksByUid.Remove(uid);
                 try { DependencyGraph.EnsureForPackage(uid); } catch { }
