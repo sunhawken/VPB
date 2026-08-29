@@ -3850,7 +3850,7 @@ namespace VPB
 		private const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
 		private const uint OPEN_EXISTING = 3;
 
-		private static bool TryGetWindowsFileId(string path, out string fileId)
+		internal static bool TryGetWindowsFileId(string path, out string fileId)
 		{
 			return TryGetWindowsFileId(path, openReparsePoint: false, out fileId);
 		}
