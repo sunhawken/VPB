@@ -1558,9 +1558,10 @@ namespace VPB
             float startY = GetContentScrollTopYForVisibility();
             float endY = startY + viewHeight;
 
-            // 2-row buffer above and below so thumbnails begin loading before items enter view.
-            startY -= effectiveItemHeight * 2f;
-            endY += effectiveItemHeight * 2f;
+            // One warm row is enough to hide binding latency. Keeping two rows alive can nearly
+            // double gallery draw calls on short/wide panes and is especially costly in VR.
+            startY -= effectiveItemHeight;
+            endY += effectiveItemHeight;
 
             int startRow = Mathf.FloorToInt(Mathf.Max(0, startY) / effectiveItemHeight);
             int endRow = Mathf.CeilToInt(endY / effectiveItemHeight);
