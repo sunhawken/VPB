@@ -2471,7 +2471,7 @@ namespace VPB
         /// Re-registers on-demand packages that VaM's Refresh sweep unregistered. Cheap when
         /// nothing was swept: RegisterNow early-outs on packages still present in VaM.
         /// </summary>
-        private static void ReverifyOnDemandRegistrations()
+        internal static void ReverifyOnDemandRegistrations()
         {
             List<string> tracked;
             lock (s_RegisteredLock)
