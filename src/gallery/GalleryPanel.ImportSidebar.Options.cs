@@ -2099,6 +2099,9 @@ namespace VPB
                     importSidebarSourceScene,
                     !string.IsNullOrEmpty(sourceHostUid) ? sourceHostUid : importSidebarSourceScene.Uid,
                     queueCoalescedRefresh: true);
+                // Same reason as the per-type slice: register the whole source tree now rather than
+                // ten packages per frame, so the first click has everything available.
+                VamOnDemandLoader.FlushPendingRegistrationsNow();
 
                 bool refreshed = VamOnDemandLoader.ForceRunPendingCoalescedVamRefresh(
                     "vpb_import_atom_full_dependency_flush");
@@ -2358,6 +2361,10 @@ namespace VPB
             try
             {
                 SceneLoadingUtils.PrewarmAndEnsureForPresetSlice(sliceJson, sourceHostUid);
+                // Prewarm only queues; the per-frame drain registers 10 at a time, so without this
+                // the preset below applied while most of the slice was still unregistered - the
+                // "click it twice" behaviour. Register the whole queue before rebuilding catalogs.
+                VamOnDemandLoader.FlushPendingRegistrationsNow();
                 // Clothing/hair-only stale UIDs skip RefreshPackageMorphs inside ForceRun (Naturalis cost).
                 VamOnDemandLoader.ForceRunPendingCoalescedVamRefresh("vpb_import_slice_prewarm_flush");
             }
@@ -2724,6 +2731,20 @@ namespace VPB
                 if (hc != null) hc.RefreshHairItems();
             }
             catch (System.Exception ex) { LogUtil.LogWarning("[VPB import] RefreshHairItems failed: " + ex.Message); }
+            try
+            {
+                // Rebuild the character's dynamic item catalogs, not just re-read them. Without
+                // RefreshDynamicHair a hair item from a package registered during this same import
+                // is not in the catalog yet and applies as "is missing"; RefreshDynamicClothes is
+                // the reason clothing eventually resolved on a second click instead of never.
+                DAZCharacterSelector sel = target.GetStorableByID("geometry") as DAZCharacterSelector;
+                if (sel != null)
+                {
+                    sel.RefreshDynamicClothes();
+                    sel.RefreshDynamicHair();
+                }
+            }
+            catch (System.Exception ex) { LogUtil.LogWarning("[VPB import] RefreshDynamic* failed: " + ex.Message); }
         }
 
         private static Atom GetControllerLinkedAtom(Atom atom)
