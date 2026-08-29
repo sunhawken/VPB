@@ -621,9 +621,11 @@ namespace VPB
                 // Fast reject — most GetFiles calls are uid:/ or Saves/ (not bare Custom/).
                 if (!PathLooksLikeBareOrBrokenCustom(__0))
                 {
-                    if (ScanWhitelistManager.Instance == null || !ScanWhitelistManager.Instance.IsEnabled) return;
                     string uidQuick = VamOnDemandLoader.UidFromEntryPath(__0);
                     if (string.IsNullOrEmpty(uidQuick)) return;
+                    // Directory enumeration inside a .DISABLED archive needs the package registered
+                    // just as much as a whitelisted one does.
+                    if (!VamOnDemandLoader.ShouldRunOnDemandForUid(uidQuick)) return;
                     VamOnDemandLoader.s_InOnDemand = true;
                     try { VamOnDemandLoader.TryRegisterPackageOnDemand(uidQuick); }
                     finally { VamOnDemandLoader.s_InOnDemand = false; }
@@ -635,17 +637,20 @@ namespace VPB
                 string bareBefore = __0;
                 TryRewriteBareCustomPath(ref __0);
 
-                if (ScanWhitelistManager.Instance == null || !ScanWhitelistManager.Instance.IsEnabled) return;
-
                 string uid = VamOnDemandLoader.UidFromEntryPath(__0);
                 if (string.IsNullOrEmpty(uid))
                 {
+                    // Owner scan walks the library, so it stays whitelist-only — there is no single
+                    // uid here to narrow it to a .DISABLED archive.
+                    if (ScanWhitelistManager.Instance == null || !ScanWhitelistManager.Instance.IsEnabled) return;
                     // Local disk already satisfies this path — skip package-owner scan (warm path).
                     string localCheck = NormalizeBareCustomInternalPath(bareBefore);
                     if (string.IsNullOrEmpty(localCheck) || !LocalCustomPathExistsOnDisk(localCheck))
                         TryRegisterOwnersForBareCustomDir(__0);
                     return;
                 }
+
+                if (!VamOnDemandLoader.ShouldRunOnDemandForUid(uid)) return;
 
                 VamOnDemandLoader.s_InOnDemand = true;
                 try { VamOnDemandLoader.TryRegisterPackageOnDemand(uid); }
@@ -2103,7 +2108,13 @@ namespace VPB
             {
                 if (VpbPerfDiag.CachedEnabled) VpbPerfDiag.GetVarEntryHook++;
                 if (__result != null) return;
-                if (!ScanWhitelistManager.Instance.IsEnabled) return;
+
+                // This is the hook every load path bottoms out in - clothing, hair, skin, morphs,
+                // pose, plugins, scenes, CUA, assets. Gating it on the whitelist alone left every
+                // one of them unable to resolve a file inside a .DISABLED archive.
+                string uidGate = VamOnDemandLoader.UidFromEntryPath(path);
+                if (string.IsNullOrEmpty(uidGate)) return;
+                if (!VamOnDemandLoader.ShouldRunOnDemandForUid(uidGate)) return;
 
                 bool entered;
                 bool prev;
@@ -2112,8 +2123,7 @@ namespace VPB
 
                 try
                 {
-                    string uid = VamOnDemandLoader.UidFromEntryPath(path);
-                    if (string.IsNullOrEmpty(uid)) return;
+                    string uid = uidGate;
                     LogUtil.RecordVarEntryMiss();
 
                     if (VamOnDemandLoader.ShouldDeferStartupOnDemandForPath(path, uid))
@@ -2167,9 +2177,9 @@ namespace VPB
             try
             {
                 if (__result != null) return;
-                if (!ScanWhitelistManager.Instance.IsEnabled) return;
                 if (string.IsNullOrEmpty(packageUidOrPath)) return;
                 if (VamOnDemandLoader.IsRawVarFilesystemPath(packageUidOrPath)) return;
+                if (!VamOnDemandLoader.ShouldRunOnDemandForUid(packageUidOrPath)) return;
 
                 // Native Refresh / pre-first-Refresh: leave miss as null. Do NOT enqueue —
                 // VaM walks every package and GetPackage/IsPackage miss thousands of times;
@@ -2223,9 +2233,9 @@ namespace VPB
             try
             {
                 if (__result) return;
-                if (!ScanWhitelistManager.Instance.IsEnabled) return;
                 if (string.IsNullOrEmpty(packageUidOrPath)) return;
                 if (VamOnDemandLoader.IsRawVarFilesystemPath(packageUidOrPath)) return;
+                if (!VamOnDemandLoader.ShouldRunOnDemandForUid(packageUidOrPath)) return;
 
                 // Same as GetPackage: no enqueue during Refresh (probe noise → register storm).
                 if (VamOnDemandLoader.ShouldDeferHeavyOnDemandProbe())
@@ -2274,9 +2284,12 @@ namespace VPB
             try
             {
                 if (__result != null) return;
-                if (!ScanWhitelistManager.Instance.IsEnabled) return;
                 if (string.IsNullOrEmpty(packageGroupUid)) return;
                 if (packageGroupUid.IndexOf('.') < 0) return;
+                // Group-level: ".latest" references resolve through here, so a group whose only
+                // copies are .DISABLED must be allowed through too.
+                if (!VamOnDemandLoader.ShouldRunOnDemandForUid(packageGroupUid)
+                    && !VamOnDemandLoader.IsKnownDisabledPackageGroup(packageGroupUid)) return;
 
                 // Same as GetPackage: no enqueue during Refresh.
                 if (VamOnDemandLoader.ShouldDeferHeavyOnDemandProbe())
