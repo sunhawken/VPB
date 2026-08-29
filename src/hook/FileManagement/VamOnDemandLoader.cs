@@ -40,21 +40,7 @@ namespace VPB
         // package living under AddonPackages, so a package registered from the link directory
         // still indexes its file entries normally.
 
-        // The link directory MUST live under AddonPackages. VaM's Refresh ends with
-        //
-        //     foreach (VarPackage p in packagesByUid.Values)
-        //         if (!hashSet.Contains(p.Path)) UnregisterPackage(p);   // -> p.Dispose()
-        //
-        // where hashSet is every path its AddonPackages sweep enumerated. Anything registered
-        // from outside that sweep is unregistered on the very next Refresh, and Dispose() sets
-        // _zipFileLazyInit = false while nulling _zipFile, so the package can never reopen its
-        // archive again - every later read fails with "Could not get ZipFile for package".
-        // Keeping the links inside the swept tree puts them in hashSet, so they survive.
-        //
-        // hashSet is built from the raw directory enumeration, before any registration filtering,
-        // so being blocked at scan time (see PreRegisterPackageScanFilter) does not remove a link
-        // from the set. The links are therefore visible to the sweep but never auto-registered.
-        internal const string OnDemandLinkDirectory = "AddonPackages/.vpb-ondemand";
+        private const string OnDemandLinkDirectory = "Cache/VPB/ondemand";
 
         [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
         [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
@@ -64,14 +50,6 @@ namespace VPB
         private static readonly Dictionary<string, string> s_LinkByArchivePath =
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private static int s_LinkFailureLogged;
-
-        /// <summary>True for a path inside the on-demand hard-link directory.</summary>
-        internal static bool IsOnDemandLinkPath(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return false;
-            return path.Replace('\\', '/')
-                       .IndexOf("/" + FileManager.OnDemandLinkDirectoryName + "/", StringComparison.OrdinalIgnoreCase) >= 0;
-        }
 
         internal static bool IsDisabledArchivePath(string path)
         {
@@ -2382,8 +2360,6 @@ namespace VPB
                     packageFiles.AddRange(Directory.GetFiles(root, "*.DISABLED", SearchOption.AllDirectories));
                     foreach (string file in packageFiles)
                     {
-                        // Our own hard links are duplicates of archives already in this list.
-                        if (IsOnDemandLinkPath(file)) continue;
                         string uid = Path.GetFileNameWithoutExtension(file);
                         if (string.IsNullOrEmpty(uid)) continue;
                         if (!uid.StartsWith(group + ".", StringComparison.OrdinalIgnoreCase)) continue;
@@ -2475,10 +2451,67 @@ namespace VPB
         /// Called from VamHookPlugin.Update() on the main thread. Drains the pending
         /// registration queue, max MaxDrainPerFrame entries per frame to avoid hitches.
         /// </summary>
+        // Set when a native FileManager.Refresh finishes. Refresh ends by unregistering every
+        // package whose Path its AddonPackages sweep did not enumerate, and our on-demand links
+        // live outside that tree by design, so each Refresh disposes them. VarPackage.Dispose sets
+        // _zipFileLazyInit = false while nulling _zipFile and the ZipFile getter only reopens while
+        // that flag is true, leaving the package permanently unreadable ("Could not get ZipFile
+        // for package"). Re-register anything that was swept.
+        //
+        // Deferred to the drain rather than done in the Refresh finalizer: registration can itself
+        // queue catalog work, and running it inside VaM's own Refresh call stack risks re-entrancy.
+        private static int s_ReverifyRegistrationsPending;
+
+        internal static void NotifyNativeRefreshCompleted()
+        {
+            Interlocked.Exchange(ref s_ReverifyRegistrationsPending, 1);
+        }
+
+        /// <summary>
+        /// Re-registers on-demand packages that VaM's Refresh sweep unregistered. Cheap when
+        /// nothing was swept: RegisterNow early-outs on packages still present in VaM.
+        /// </summary>
+        private static void ReverifyOnDemandRegistrations()
+        {
+            List<string> tracked;
+            lock (s_RegisteredLock)
+            {
+                if (s_RegisteredOnDemand.Count == 0) return;
+                tracked = new List<string>(s_RegisteredOnDemand);
+            }
+
+            int restored = 0;
+            for (int i = 0; i < tracked.Count; i++)
+            {
+                string uid = tracked[i];
+                if (string.IsNullOrEmpty(uid)) continue;
+                if (IsUidAlreadyRegisteredInVam(uid)) continue;
+
+                string resolvedUid, varPath;
+                if (!TryResolveVarPathForUid(uid, out resolvedUid, out varPath)) continue;
+                if (string.IsNullOrEmpty(varPath)) continue;
+
+                RegisterNow(resolvedUid ?? uid, varPath);
+                restored++;
+            }
+
+            if (restored > 0)
+                LogUtil.Log("[VPB OnDemand] Re-registered " + restored + " package(s) unregistered by VaM's Refresh sweep.");
+        }
+
         public static void DrainMainThreadQueue()
         {
             MaybeLogStartupSummary();
             if (VamScanFilter.IsVamRefreshInProgress) return;
+
+            if (Interlocked.Exchange(ref s_ReverifyRegistrationsPending, 0) != 0)
+            {
+                try { ReverifyOnDemandRegistrations(); }
+                catch (Exception ex)
+                {
+                    LogUtil.LogWarning("[VPB OnDemand] Re-registration after Refresh failed: " + ex.Message);
+                }
+            }
 
             // Non-script requests deferred after first Refresh but before READY were stuck in
             // s_VamNotReady* (NotifyVamFileManagerRefreshed only runs once). Flush at READY.
