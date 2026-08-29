@@ -38,13 +38,15 @@ namespace VPB
                 {
                     if (backgroundHoverColor != null)
                     {
-                        backgroundHoverColor.normalColor = backgroundColor;
-                        backgroundHoverColor.hoverColor = backgroundColor;
+                        if (backgroundHoverColor.normalColor != backgroundColor)
+                            backgroundHoverColor.normalColor = backgroundColor;
+                        if (backgroundHoverColor.hoverColor != backgroundColor)
+                            backgroundHoverColor.hoverColor = backgroundColor;
                     }
                     if (backgroundBoxGO != null)
                     {
                         Image bgImg = backgroundBoxGO.GetComponent<Image>();
-                        if (bgImg != null) bgImg.color = backgroundColor;
+                        if (bgImg != null && bgImg.color != backgroundColor) bgImg.color = backgroundColor;
                     }
                 }
                 catch { }
@@ -82,7 +84,11 @@ namespace VPB
                 Image img = go.GetComponent<Image>();
                 if (img == null) return;
                 if (img.color != SideHoverHitAreaInvisible) img.color = SideHoverHitAreaInvisible;
-                img.raycastTarget = true;
+                if (!img.raycastTarget) img.raycastTarget = true;
+                // This object is only a pointer hit target. Do not submit its fully transparent
+                // full-height quad to the GPU every frame.
+                CanvasRenderer cr = img.canvasRenderer;
+                if (cr != null && !cr.cull) cr.cull = true;
             }
             catch { }
         }
@@ -97,12 +103,16 @@ namespace VPB
                 if (img != null)
                 {
                     Color collapsedColor = opaque ? CollapseTriggerCollapsedOpaque : CollapseTriggerCollapsedTransparent;
-                    img.color = isCollapsed ? collapsedColor : CollapseTriggerExpandedHidden;
-                    img.raycastTarget = isCollapsed;
+                    Color want = isCollapsed ? collapsedColor : CollapseTriggerExpandedHidden;
+                    if (img.color != want) img.color = want;
+                    if (img.raycastTarget != isCollapsed) img.raycastTarget = isCollapsed;
+                    CanvasRenderer cr = img.canvasRenderer;
+                    if (cr != null && cr.cull == isCollapsed) cr.cull = !isCollapsed;
                 }
             }
             catch { }
-            if (handleText != null) handleText.gameObject.SetActive(isCollapsed);
+            if (handleText != null && handleText.gameObject.activeSelf != isCollapsed)
+                handleText.gameObject.SetActive(isCollapsed);
         }
 
         internal static void ApplyGalleryTransparencyToAllPanels()

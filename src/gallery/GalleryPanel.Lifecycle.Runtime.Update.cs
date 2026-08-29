@@ -180,9 +180,12 @@ namespace VPB
 
                     // Show trigger whenever collapsed (to allow expanding), or when in AH mode expanded (for hover detection)
                     bool showTrigger = isCollapsed || autoCollapse;
-                    if (collapseTriggerGO != null) collapseTriggerGO.SetActive(showTrigger && string.Equals(dock, "Right", StringComparison.OrdinalIgnoreCase));
-                    if (collapseTriggerLeftGO != null) collapseTriggerLeftGO.SetActive(showTrigger && string.Equals(dock, "Left", StringComparison.OrdinalIgnoreCase));
-                    if (collapseTriggerTopGO != null) collapseTriggerTopGO.SetActive(showTrigger && string.Equals(dock, "Top", StringComparison.OrdinalIgnoreCase));
+                    bool showRightTrigger = showTrigger && string.Equals(dock, "Right", StringComparison.OrdinalIgnoreCase);
+                    bool showLeftTrigger = showTrigger && string.Equals(dock, "Left", StringComparison.OrdinalIgnoreCase);
+                    bool showTopTrigger = showTrigger && string.Equals(dock, "Top", StringComparison.OrdinalIgnoreCase);
+                    if (collapseTriggerGO != null && collapseTriggerGO.activeSelf != showRightTrigger) collapseTriggerGO.SetActive(showRightTrigger);
+                    if (collapseTriggerLeftGO != null && collapseTriggerLeftGO.activeSelf != showLeftTrigger) collapseTriggerLeftGO.SetActive(showLeftTrigger);
+                    if (collapseTriggerTopGO != null && collapseTriggerTopGO.activeSelf != showTopTrigger) collapseTriggerTopGO.SetActive(showTopTrigger);
                     ApplyFixedCollapseTriggerVisuals();
 
                     if (isCollapsed)
@@ -493,7 +496,8 @@ namespace VPB
             {
                 // Path text and status text are never shown together; status has priority.
                 bool showPath = string.IsNullOrEmpty(finalStatus) && !string.IsNullOrEmpty(hoverPathText.text);
-                hoverPathText.gameObject.SetActive(showPath);
+                if (hoverPathText.gameObject.activeSelf != showPath)
+                    hoverPathText.gameObject.SetActive(showPath);
             }
 
             // Info bar (hoverPathRT) is always active — no show/hide needed
