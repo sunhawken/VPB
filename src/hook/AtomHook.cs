@@ -356,35 +356,35 @@ namespace VPB
                     else
                         touchedUid = key;
 
-                    // In scan-whitelist mode, pre-register the resolved UID in native VaM FileManager before preset lookups.
-                    if (ScanWhitelistManager.Instance.IsEnabled)
+                    // Pre-register resources that are not present in native VaM FileManager. This is
+                    // also needed with the whitelist disabled when an appearance lives in AllPackages
+                    // or a .disabled resource tree. The loader's registered/session caches make the
+                    // normal AddonPackages case a cheap no-op.
+                    try
                     {
-                        try
+                        string od = null;
+                        if (pkg != null && !string.IsNullOrEmpty(pkg.Uid))
+                            od = VamOnDemandLoader.TryRegisterPackageOnDemand(pkg.Uid);
+                        else
+                            od = VamOnDemandLoader.TryRegisterPackageOnDemand(key);
+                        if (!string.IsNullOrEmpty(od))
                         {
-                            string od = null;
-                            if (pkg != null && !string.IsNullOrEmpty(pkg.Uid))
-                                od = VamOnDemandLoader.TryRegisterPackageOnDemand(pkg.Uid);
-                            else
-                                od = VamOnDemandLoader.TryRegisterPackageOnDemand(key);
-                            if (!string.IsNullOrEmpty(od))
-                            {
-                                if (VamOnDemandLoader.PackageRegistrationNeedsNativeCatalogRefresh(touchedUid, null))
-                                {
-                                    result.NeedsNativeCatalogRefresh = true;
-                                    if (result.NewlyRegisteredUids == null)
-                                        result.NewlyRegisteredUids = new List<string>();
-                                    if (!string.IsNullOrEmpty(touchedUid))
-                                        result.NewlyRegisteredUids.Add(touchedUid);
-                                }
-                            }
-                            else if (!string.IsNullOrEmpty(touchedUid)
-                                && VamOnDemandLoader.IsPromotedPackageCatalogStale(touchedUid))
+                            if (VamOnDemandLoader.PackageRegistrationNeedsNativeCatalogRefresh(touchedUid, null))
                             {
                                 result.NeedsNativeCatalogRefresh = true;
+                                if (result.NewlyRegisteredUids == null)
+                                    result.NewlyRegisteredUids = new List<string>();
+                                if (!string.IsNullOrEmpty(touchedUid))
+                                    result.NewlyRegisteredUids.Add(touchedUid);
                             }
                         }
-                        catch { }
+                        else if (!string.IsNullOrEmpty(touchedUid)
+                            && VamOnDemandLoader.IsPromotedPackageCatalogStale(touchedUid))
+                        {
+                            result.NeedsNativeCatalogRefresh = true;
+                        }
                     }
+                    catch { }
 
                     if (pkg == null)
                     {

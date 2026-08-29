@@ -1100,7 +1100,6 @@ namespace VPB
             HashSet<string> pluginHostUids,
             HashSet<string> precollectedUids)
         {
-            if (!ScanWhitelistManager.Instance.IsEnabled) return 0;
             if (entry == null && string.IsNullOrEmpty(pathHint) && (precollectedUids == null || precollectedUids.Count == 0))
                 return 0;
 
@@ -1252,7 +1251,6 @@ namespace VPB
         // source host package for SELF:) and their transitive deps, not the source scene's full closure.
         public static int PrewarmAndEnsureForPresetSlice(string sliceJson, string hostUid)
         {
-            if (!ScanWhitelistManager.Instance.IsEnabled) return 0;
             if (string.IsNullOrEmpty(sliceJson)) return 0;
 
             HashSet<string> directDeps;
@@ -1425,13 +1423,12 @@ namespace VPB
         }
 
         /// <summary>
-        /// Scan-whitelist: temp-allow host + SQL transitive deps and prewarm on-demand registration
-        /// for scene loads that did not go through the VPB gallery prepare path.
+        /// Temp-allow when required, then prewarm host + SQL transitive dependencies for scene
+        /// loads that did not go through the VPB gallery prepare path.
         /// </summary>
         static void EnsureNativeSceneLoadWhitelistAndPrewarm(string saveName, bool loadMerge)
         {
             if (string.IsNullOrEmpty(saveName)) return;
-            if (!ScanWhitelistManager.Instance.IsEnabled) return;
             if (TryConsumeGallerySceneLoadPrep()) return;
 
             var needed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

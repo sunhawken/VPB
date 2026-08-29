@@ -150,7 +150,7 @@ namespace VPB
         /// <summary>
         /// Before clothing/hair UI Assist <c>SetActive*</c>: register scan-excluded package in native
         /// FileManager. Optionally flush coalesced Refresh so <c>RefreshDynamicItems</c>
-        /// (onRefreshHandlers) rebuilds catalogs. Main thread only. No-op when scan whitelist off.
+        /// (onRefreshHandlers) rebuilds catalogs. Main thread only.
         /// </summary>
         /// <param name="allowCatalogForceRefresh">
         /// True only when the item is missing from the person catalog (string-id miss).
@@ -163,7 +163,6 @@ namespace VPB
             bool allowCatalogForceRefresh)
         {
             if (string.IsNullOrEmpty(packageUid)) return;
-            if (!ScanWhitelistManager.Instance.IsEnabled) return;
             if (!IsMainThread()) return;
 
             // Fast path: native already has package and clothing/hair catalog is fresh.
@@ -253,7 +252,6 @@ namespace VPB
         {
             if (string.IsNullOrEmpty(packageUidOrPath)) return;
             if (IsRawVarFilesystemPath(packageUidOrPath)) return;
-            if (!ScanWhitelistManager.Instance.IsEnabled) return;
             // Refresh-time probes must not queue — see #12 hooks (log 22 register storm / crash).
             if (VamScanFilter.IsVamRefreshInProgress) return;
 
@@ -883,7 +881,6 @@ namespace VPB
         /// </summary>
         public static bool ShouldRequestCoalescedNativeRefreshForUids(ICollection<string> uids, int newlyRegisteredCount)
         {
-            if (!ScanWhitelistManager.Instance.IsEnabled) return false;
             if (newlyRegisteredCount <= 0) return false;
             if (uids == null || uids.Count == 0) return false;
 
@@ -1550,7 +1547,6 @@ namespace VPB
         public static string TryRegisterPackageOnDemand(string uid, bool persistUidOverride = false)
         {
             if (string.IsNullOrEmpty(uid)) return null;
-            if (!ScanWhitelistManager.Instance.IsEnabled) return null;
             if (!VamScanFilter.HasRegisterMethodAccess) return null;
             if (!persistUidOverride && IsRawVarFilesystemPath(uid)) return null;
 
@@ -1895,7 +1891,6 @@ namespace VPB
         public static bool EnsureDeclaredDependenciesActivatedForParent(string parentUid)
         {
             if (string.IsNullOrEmpty(parentUid)) return false;
-            if (!ScanWhitelistManager.Instance.IsEnabled) return false;
 
             // pkg_dep is keyed by concrete version; a plugin URL may carry ".latest".
             string resolved = parentUid;
@@ -2302,7 +2297,6 @@ namespace VPB
         /// </summary>
         public static void DrainMainThreadQueue()
         {
-            if (!ScanWhitelistManager.Instance.IsEnabled) return;
             MaybeLogStartupSummary();
             if (VamScanFilter.IsVamRefreshInProgress) return;
 
