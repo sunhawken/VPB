@@ -1101,7 +1101,18 @@ namespace VPB
                 if (VpbPerfDiag.CachedEnabled) VpbPerfDiag.FileExistsHook++;
                 if (result) return;
                 if (onlySystemFiles) return;
-                if (!ScanWhitelistManager.Instance.IsEnabled) return;
+
+                // The whitelist gate assumed that with scanning unrestricted every package is
+                // already registered, so a miss could only mean "genuinely absent". That never
+                // holds for .DISABLED: VaM cannot register those archives at all, so a reference
+                // into one always misses here no matter what the whitelist is set to. Without this
+                // even an existence check fails, which is enough on its own to stop a scene from
+                // being offered for load. The uid lookup is in-memory against VPB's own index.
+                string uidEarly = VamOnDemandLoader.UidFromEntryPath(path);
+                if (string.IsNullOrEmpty(uidEarly)) return;
+                if (!ScanWhitelistManager.Instance.IsEnabled
+                    && !VamOnDemandLoader.IsKnownDisabledPackageUid(uidEarly))
+                    return;
 
                 bool entered;
                 bool prev;
@@ -1110,8 +1121,7 @@ namespace VPB
 
                 try
                 {
-                    string uid = VamOnDemandLoader.UidFromEntryPath(path);
-                    if (string.IsNullOrEmpty(uid)) return;
+                    string uid = uidEarly;
                     LogUtil.RecordVarEntryMiss();
 
                     if (VamOnDemandLoader.ShouldDeferStartupOnDemandForPath(path, uid))

@@ -51,6 +51,22 @@ namespace VPB
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private static int s_LinkFailureLogged;
 
+        /// <summary>
+        /// True when the uid names a package VPB has indexed whose archive on disk is .DISABLED.
+        /// In-memory lookup against VPB's own package index (ensureInstalled: false) — safe to call
+        /// from hot miss-hooks, which is why callers must not resolve this by touching the disk.
+        /// </summary>
+        internal static bool IsKnownDisabledPackageUid(string uid)
+        {
+            if (string.IsNullOrEmpty(uid)) return false;
+            try
+            {
+                VarPackage pkg = FileManager.GetPackage(uid, false);
+                return pkg != null && IsDisabledArchivePath(pkg.Path);
+            }
+            catch { return false; }
+        }
+
         internal static bool IsDisabledArchivePath(string path)
         {
             return !string.IsNullOrEmpty(path)
