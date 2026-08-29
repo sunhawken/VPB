@@ -1558,10 +1558,11 @@ namespace VPB
             float startY = GetContentScrollTopYForVisibility();
             float endY = startY + viewHeight;
 
-            // One warm row is enough to hide binding latency. Keeping two rows alive can nearly
-            // double gallery draw calls on short/wide panes and is especially costly in VR.
-            startY -= effectiveItemHeight;
-            endY += effectiveItemHeight;
+            // Keep only a quarter-row warm. A full extra row is substantial overdraw on wide
+            // fixed panes; async thumbnail binding still starts just before the row is exposed.
+            float warmBand = effectiveItemHeight * 0.25f;
+            startY -= warmBand;
+            endY += warmBand;
 
             int startRow = Mathf.FloorToInt(Mathf.Max(0, startY) / effectiveItemHeight);
             int endRow = Mathf.CeilToInt(endY / effectiveItemHeight);
