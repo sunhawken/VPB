@@ -67,6 +67,35 @@ namespace VPB
             catch { return false; }
         }
 
+        /// <summary>
+        /// True when any version in the group (e.g. "Creator.Package") is a .DISABLED archive.
+        /// GetPackage resolves a "&lt;group&gt;.latest" uid, so this stays an in-memory lookup.
+        /// </summary>
+        internal static bool IsKnownDisabledPackageGroup(string groupUid)
+        {
+            if (string.IsNullOrEmpty(groupUid)) return false;
+            if (groupUid.IndexOf(':') >= 0) return false;
+            return IsKnownDisabledPackageUid(groupUid + ".latest");
+        }
+
+        /// <summary>
+        /// Gate for the native resolution hooks. On-demand work must run when the scan whitelist is
+        /// on (its original purpose) and ALSO whenever the uid names a .DISABLED archive: VaM can
+        /// never register those itself, so "whitelist off" does not imply "already registered".
+        /// Kept to an in-memory index lookup - these hooks miss thousands of times during a native
+        /// Refresh, and doing disk work here previously caused a zip-scan storm.
+        /// </summary>
+        internal static bool ShouldRunOnDemandForUid(string uid)
+        {
+            try
+            {
+                if (ScanWhitelistManager.Instance != null && ScanWhitelistManager.Instance.IsEnabled)
+                    return true;
+            }
+            catch { }
+            return IsKnownDisabledPackageUid(uid);
+        }
+
         internal static bool IsDisabledArchivePath(string path)
         {
             return !string.IsNullOrEmpty(path)
