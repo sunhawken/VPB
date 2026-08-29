@@ -350,6 +350,7 @@ namespace VPB
                         {
                             // First-click reliability: if prewarm queued a coalesced refresh, run it now
                             // before one-shot preset/material lookup work starts.
+                            VamOnDemandLoader.FlushPendingRegistrationsNow();
                             VamOnDemandLoader.ForceRunPendingCoalescedVamRefresh("pre_apply_prewarm_flush");
                         }
                     }

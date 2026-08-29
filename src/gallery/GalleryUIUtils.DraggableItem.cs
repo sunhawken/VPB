@@ -631,6 +631,7 @@ namespace VPB
             try
             {
                 SceneLoadingUtils.PrewarmOnDemandPackagesForEntry(FileEntry, path, queueCoalescedRefresh: true);
+                VamOnDemandLoader.FlushPendingRegistrationsNow();
                 VamOnDemandLoader.ForceRunPendingCoalescedVamRefresh("cua_button_dependency_flush");
             }
             catch (Exception ex)
@@ -732,6 +733,7 @@ namespace VPB
             try
             {
                 SceneLoadingUtils.PrewarmOnDemandPackagesForEntry(FileEntry, normalizedPath, queueCoalescedRefresh: true);
+                VamOnDemandLoader.FlushPendingRegistrationsNow();
                 VamOnDemandLoader.ForceRunPendingCoalescedVamRefresh("subscene_button_dependency_flush");
             }
             catch (Exception ex)
@@ -858,6 +860,7 @@ namespace VPB
             try
             {
                 SceneLoadingUtils.PrewarmOnDemandPackagesForEntry(FileEntry, FileEntry != null ? FileEntry.Uid : null);
+                VamOnDemandLoader.FlushPendingRegistrationsNow();
                 VamOnDemandLoader.ForceRunPendingCoalescedVamRefresh("plugin_preset_prewarm_flush");
             }
             catch (Exception ex)
@@ -927,6 +930,7 @@ namespace VPB
                 SceneLoadingUtils.PrewarmOnDemandPackagesForEntry(entry, pluginUrl, queueCoalescedRefresh: true);
                 VamOnDemandLoader.TryRegisterPackageOnDemandForEntryPath(pluginUrl);
                 pluginUrl = VamOnDemandLoader.RewriteEntryPathToBestAvailable(pluginUrl, attemptRegister: true);
+                VamOnDemandLoader.FlushPendingRegistrationsNow();
                 VamOnDemandLoader.ForceRunPendingCoalescedVamRefresh("plugin_script_prewarm_flush");
             }
             catch (Exception ex)
@@ -1060,6 +1064,7 @@ namespace VPB
             try
             {
                 SceneLoadingUtils.PrewarmOnDemandPackagesForEntry(FileEntry, normalizedPath);
+                VamOnDemandLoader.FlushPendingRegistrationsNow();
                 VamOnDemandLoader.ForceRunPendingCoalescedVamRefresh("pose_button_dependency_flush");
             }
             catch (Exception ex)

@@ -1660,7 +1660,16 @@ namespace VPB
             try
             {
                 var selector = atom.GetStorableByID("geometry") as DAZCharacterSelector;
-                if (selector != null) selector.RefreshDynamicClothes();
+                if (selector != null)
+                {
+                    // Clothing had the deep rebuild and hair did not, so a newly registered package's
+                    // hair never entered the character's dynamic item catalog and every hair item in
+                    // it applied as "is missing". RefreshHairItems alone only re-reads the catalog;
+                    // RefreshDynamicHair is what rebuilds it, exactly as RefreshDynamicClothes does
+                    // for clothing.
+                    selector.RefreshDynamicClothes();
+                    selector.RefreshDynamicHair();
+                }
             }
             catch { }
         }
@@ -2542,6 +2551,58 @@ namespace VPB
 
             if (restored > 0)
                 LogUtil.Log("[VPB OnDemand] Re-registered " + restored + " package(s) unregistered by VaM's Refresh sweep.");
+        }
+
+        /// <summary>
+        /// Drains the pending registration queue to empty, on the calling frame.
+        /// <para>
+        /// The per-frame drain registers at most <see cref="MaxDrainPerFrame"/> entries, so an
+        /// import that just prewarmed thirty-odd packages still had most of them queued when it
+        /// applied its preset in the same frame - the clothing and hair simply were not registered
+        /// yet. A second click worked only because the queue had drained in between. Import paths
+        /// call this so one click is enough.
+        /// </para>
+        /// Bounded by <paramref name="maxEntries"/> so a pathological queue cannot stall a frame
+        /// indefinitely. Returns the number registered.
+        /// </summary>
+        public static int FlushPendingRegistrationsNow(int maxEntries = 4096)
+        {
+            int flushed = 0;
+            try
+            {
+                while (flushed < maxEntries)
+                {
+                    string entry;
+                    lock (s_QueueLock)
+                    {
+                        if (s_PendingPaths.Count == 0) break;
+                        entry = s_PendingPaths.Dequeue();
+                    }
+                    if (string.IsNullOrEmpty(entry)) continue;
+
+                    string uid, path;
+                    if (TryResolveQueueEntry(entry, out uid, out path))
+                    {
+                        if (!string.IsNullOrEmpty(uid))
+                        {
+                            RegisterNow(uid, path);
+                            flushed++;
+                        }
+                    }
+                    else if (entry.StartsWith(UidOnlyPathPrefix, StringComparison.Ordinal))
+                    {
+                        string req = entry.Substring(UidOnlyPathPrefix.Length);
+                        if (!string.IsNullOrEmpty(req)) MarkFailure(req);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogUtil.LogWarning("[VPB OnDemand] FlushPendingRegistrationsNow failed: " + ex.Message);
+            }
+            if (flushed > 0)
+                LogUtil.Log("[VPB OnDemand] Flushed " + flushed + " pending registration(s) synchronously for import.");
+            return flushed;
         }
 
         public static void DrainMainThreadQueue()
