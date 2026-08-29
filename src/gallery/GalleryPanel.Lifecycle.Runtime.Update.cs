@@ -130,8 +130,15 @@ namespace VPB
                 }
                 catch { }
 
-                try { ApplyVamMenuGateVisibility(); } catch { }
-                try { ApplyVamMenuAnchoring(); } catch { }
+                // Menu ownership/anchors do not need frame-rate polling.  Ten Hz remains
+                // responsive while avoiding repeated Canvas hierarchy walks at 90/120 Hz.
+                bool maintainOverlayChrome = Time.unscaledTime >= _nextOverlayChromeMaintenanceTime;
+                if (maintainOverlayChrome)
+                {
+                    _nextOverlayChromeMaintenanceTime = Time.unscaledTime + 0.10f;
+                    try { ApplyVamMenuGateVisibility(); } catch { }
+                    try { ApplyVamMenuAnchoring(); } catch { }
+                }
                 try { UpdateLoadingOverlayPulse(); } catch { }
 
                 // Determine whether the gallery is "active" (scrolling or thumbnails still loading).
@@ -281,7 +288,19 @@ namespace VPB
                         if (_resizeHandleFixedBottomRightGO != null) _resizeHandleFixedBottomRightGO.SetActive(false);
                     }
 
-                    // Always update anchors in Fixed mode to support height toggles and screen resizing
+                    // Update fixed geometry only when its inputs change. RectTransform writes and
+                    // handle maintenance can otherwise force Canvas rebuild work every frame.
+                    string fixedLayoutKey = dock + "|" + Screen.width + "x" + Screen.height + "|"
+                        + VPBConfig.Instance.DesktopCustomWidth.ToString("R") + "|"
+                        + VPBConfig.Instance.DesktopFixedHeightMode + "|"
+                        + VPBConfig.Instance.DesktopCustomHeight.ToString("R") + "|"
+                        + (isCollapsed ? "1" : "0");
+                    bool fixedLayoutDirty = fixedLayoutKey != _lastFixedOverlayLayoutKey;
+                    if (fixedLayoutDirty)
+                    {
+                        _lastFixedOverlayLayoutKey = fixedLayoutKey;
+
+                    // Update anchors in Fixed mode when settings, collapse state, or screen size changes.
                     RectTransform bgRT = _backgroundBoxRT;
                     if (bgRT == null)
                     {
@@ -396,6 +415,7 @@ namespace VPB
                     }
 
                     // Separate triggers handle chamfer direction; nothing to mirror here.
+                    }
                 }
                 else if (backgroundBoxGO != null)
                 {

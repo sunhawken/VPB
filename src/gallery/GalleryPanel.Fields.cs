@@ -1208,6 +1208,10 @@ namespace VPB
         private UIAnchorResizer _fixedBottomResizer;
         private UIAnchorResizer _fixedBottomRightResizer;
         private string _fixedDockHandleIconKey;
+        // Fixed desktop chrome is static most frames.  Reapplying menu anchors and dock
+        // geometry every Update dirties Unity's Canvas hierarchy and is a large idle cost.
+        private float _nextOverlayChromeMaintenanceTime;
+        private string _lastFixedOverlayLayoutKey;
         private GameObject footerBackBtn;
         private GameObject footerClearFilterBtn;
         private Text footerFilterModeText;
