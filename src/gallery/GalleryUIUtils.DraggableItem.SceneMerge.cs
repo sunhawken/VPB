@@ -321,6 +321,7 @@ namespace VPB
             }
 
             bool shouldPrewarmOnDemand =
+                itemType == ItemType.Appearance ||
                 itemType == ItemType.Clothing ||
                 itemType == ItemType.Hair ||
                 itemType == ItemType.ClothingItem ||
