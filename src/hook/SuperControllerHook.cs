@@ -2017,6 +2017,18 @@ namespace VPB
                 string norm = __0.Replace('\\', '/');
                 if (!norm.StartsWith("AddonPackages/", StringComparison.OrdinalIgnoreCase)) return true;
 
+                // On-demand hard links for .DISABLED archives live under AddonPackages so VaM's
+                // Refresh sweep can see them and will not dispose the packages they back. They
+                // must never be picked up by the startup scan though, or a disabled package would
+                // silently become permanently enabled. Block them for every caller except the
+                // deliberate on-demand register above — note this check sits ahead of the
+                // whitelist test, which returns true (fail open) when the whitelist is disabled.
+                if (norm.IndexOf(VamOnDemandLoader.OnDemandLinkDirectory, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    VamScanFilter.RecordScanBlocked();
+                    return false;
+                }
+
                 if (!ScanWhitelistManager.Instance.IsEnabled) return true;
 
                 string uid = System.IO.Path.GetFileNameWithoutExtension(norm);
