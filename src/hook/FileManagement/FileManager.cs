@@ -735,8 +735,24 @@ namespace VPB
         protected static string packagePathToUid(string vpath)
         {
             string input = vpath.Replace('\\', '/');
-            input = Regex.Replace(input, "\\.(var|zip)$", string.Empty);
+            // Qvaro/VaM libraries commonly disable an archive by replacing .var with
+            // .DISABLED.  It is still a ZIP package and must retain the same canonical UID
+            // so the gallery, categories and on-demand loader can index it.
+            input = Regex.Replace(input, "\\.(var|zip|disabled)$", string.Empty, RegexOptions.IgnoreCase);
             return Regex.Replace(input, ".*/", string.Empty);
+        }
+
+        internal static bool IsPackageArchivePath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            return path.EndsWith(".var", StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith(".DISABLED", StringComparison.OrdinalIgnoreCase);
+        }
+
+        static void SafeGetPackageArchives(string root, List<string> results)
+        {
+            SafeGetFiles(root, "*.var", results);
+            SafeGetFiles(root, "*.DISABLED", results);
         }
 
         /// <summary>
@@ -1522,7 +1538,7 @@ namespace VPB
             if (recursive)
             {
                 List<string> paths = new List<string>();
-                SafeGetFiles(dirPath, "*.var", paths);
+                SafeGetPackageArchives(dirPath, paths);
                 for (int i = 0; i < paths.Count; i++)
                 {
                     string path = paths[i];
@@ -1534,6 +1550,7 @@ namespace VPB
 
             List<string> immediateFiles = new List<string>();
             SafeGetImmediateFilesInDirectory(dirPath, "*.var", immediateFiles);
+            SafeGetImmediateFilesInDirectory(dirPath, "*.DISABLED", immediateFiles);
             for (int i = 0; i < immediateFiles.Count; i++)
             {
                 string path = immediateFiles[i];
@@ -1746,6 +1763,14 @@ namespace VPB
                             {
                                 allVarFiles.AddRange(cachedPaths);
                             }
+                            // Older inventory caches contain only *.var. Always merge the usually
+                            // much smaller disabled set so upgrading VPB immediately restores those
+                            // packages without requiring users to delete Cache/VPB or force a rescan.
+                            foreach (string root in scanRoots)
+                            {
+                                if (Directory.Exists(root))
+                                    SafeGetFiles(root, "*.DISABLED", allVarFiles);
+                            }
                             usedPathCache = true;
                             return;
                         }
@@ -1753,7 +1778,7 @@ namespace VPB
                         foreach (string root in scanRoots)
                         {
                             if (Directory.Exists(root))
-                                SafeGetFiles(root, "*.var", allVarFiles);
+                                SafeGetPackageArchives(root, allVarFiles);
                         }
 
                         if (VamStartupOptimizations.UseCachedVarPathInventory && allVarFiles.Count > 0)
@@ -3477,8 +3502,8 @@ namespace VPB
 				try
 				{
 					string fn = Path.GetFileName(lastKnownVarPath.TrimEnd('/', '\\'));
-					if (!string.IsNullOrEmpty(fn) && fn.EndsWith(".var", StringComparison.OrdinalIgnoreCase))
-						fromPath = fn.Substring(0, fn.Length - 4);
+					if (!string.IsNullOrEmpty(fn) && IsPackageArchivePath(fn))
+						fromPath = fn.Substring(0, fn.LastIndexOf('.'));
 				}
 				catch { }
 			}
@@ -3501,6 +3526,8 @@ namespace VPB
 
 			if (s.EndsWith(".var", StringComparison.OrdinalIgnoreCase))
 				s = s.Substring(0, s.Length - 4);
+			else if (s.EndsWith(".DISABLED", StringComparison.OrdinalIgnoreCase))
+				s = s.Substring(0, s.Length - 9);
 			else if (s.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
 				s = s.Substring(0, s.Length - 4);
 
@@ -3548,7 +3575,7 @@ namespace VPB
 			if (!string.IsNullOrEmpty(packageUid))
 			{
 				string p = packageUid.Replace('\\', '/').Trim();
-				if (p.IndexOf('/') >= 0 || p.EndsWith(".var", StringComparison.OrdinalIgnoreCase) || p.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+				if (p.IndexOf('/') >= 0 || IsPackageArchivePath(p) || p.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
 				{
 					pkg = GetPackage(p, false);
 					if (pkg != null && string.Equals(pkg.Uid, uidKey, StringComparison.OrdinalIgnoreCase))

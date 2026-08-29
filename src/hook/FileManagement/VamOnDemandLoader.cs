@@ -110,6 +110,9 @@ namespace VPB
                 string filename = uid + ".var";
                 if (File.Exists(Path.Combine("AddonPackages", filename))) return true;
                 if (File.Exists(Path.Combine("AllPackages", filename))) return true;
+                filename = uid + ".DISABLED";
+                if (File.Exists(Path.Combine("AddonPackages", filename))) return true;
+                if (File.Exists(Path.Combine("AllPackages", filename))) return true;
             }
             catch { }
 
@@ -271,7 +274,8 @@ namespace VPB
                 if (!string.IsNullOrEmpty(fromEntry)) s = fromEntry;
             }
             if (s.EndsWith(".var", StringComparison.OrdinalIgnoreCase)
-                || s.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                || s.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)
+                || s.EndsWith(".DISABLED", StringComparison.OrdinalIgnoreCase))
             {
                 string fromPath = UidFromVarPath(s);
                 if (!string.IsNullOrEmpty(fromPath)) s = fromPath;
@@ -1534,7 +1538,8 @@ namespace VPB
             string p = request.Replace('\\', '/').Trim();
             if (p.IndexOf(":/", StringComparison.Ordinal) >= 0) return false;
             if (!p.EndsWith(".var", StringComparison.OrdinalIgnoreCase)
-                && !p.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                && !p.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)
+                && !p.EndsWith(".DISABLED", StringComparison.OrdinalIgnoreCase))
                 return false;
             return p.StartsWith("AddonPackages/", StringComparison.OrdinalIgnoreCase)
                 || p.StartsWith("AllPackages/", StringComparison.OrdinalIgnoreCase);
@@ -2210,7 +2215,10 @@ namespace VPB
                 try
                 {
                     if (!Directory.Exists(root)) continue;
-                    foreach (string file in Directory.GetFiles(root, "*.var", SearchOption.AllDirectories))
+                    var packageFiles = new List<string>();
+                    packageFiles.AddRange(Directory.GetFiles(root, "*.var", SearchOption.AllDirectories));
+                    packageFiles.AddRange(Directory.GetFiles(root, "*.DISABLED", SearchOption.AllDirectories));
+                    foreach (string file in packageFiles)
                     {
                         string uid = Path.GetFileNameWithoutExtension(file);
                         if (string.IsNullOrEmpty(uid)) continue;
@@ -2253,6 +2261,11 @@ namespace VPB
             if (File.Exists(addon)) return addon;
             string all = NormalizePath(Path.Combine("AllPackages", filename));
             if (File.Exists(all)) return all;
+            string disabledFilename = uid + ".DISABLED";
+            string addonDisabled = NormalizePath(Path.Combine("AddonPackages", disabledFilename));
+            if (File.Exists(addonDisabled)) return addonDisabled;
+            string allDisabled = NormalizePath(Path.Combine("AllPackages", disabledFilename));
+            if (File.Exists(allDisabled)) return allDisabled;
 
             // Recursive walk is expensive on large libraries — never during Refresh / pre-ready.
             if (VamScanFilter.IsVamRefreshInProgress
@@ -2265,6 +2278,9 @@ namespace VPB
                 {
                     if (!Directory.Exists(root)) continue;
                     string[] matches = Directory.GetFiles(root, filename, SearchOption.AllDirectories);
+                    if (matches != null && matches.Length > 0)
+                        return NormalizePath(matches[0]);
+                    matches = Directory.GetFiles(root, disabledFilename, SearchOption.AllDirectories);
                     if (matches != null && matches.Length > 0)
                         return NormalizePath(matches[0]);
                 }
