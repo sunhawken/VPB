@@ -2115,6 +2115,64 @@ namespace VPB
             }
         }
 
+        /// <summary>
+        /// Slice-scoped dependency prep for the import paths that do not run through
+        /// <see cref="ApplyOneTypeImport"/> — CUA and scene-atom spawning. Those atoms can reference
+        /// packages the source scene never declares, so without this their assets resolve as missing
+        /// (and a .DISABLED dependency is never activated at all).
+        /// Mirrors the prep ApplyOneTypeImport already does for every other type.
+        /// </summary>
+        private void PrepareImportSliceDependencies(
+            JSONClass scene, ICollection<string> atomIds, string sourceHostUid, string reason)
+        {
+            if (scene == null) return;
+            try
+            {
+                JSONClass slice = BuildAtomSliceForDependencyPrep(scene, atomIds);
+                if (slice == null) return;
+
+                // StringBuilder serializer: SimpleJSON .ToString() is O(N^2) and heap-bombs a
+                // multi-MB scene, same reason ApplyOneTypeImport uses it.
+                string sliceJson = VPB.src.util.JsonSerializationUtil.Serialize(slice, 1 << 20);
+                SceneLoadingUtils.PrewarmAndEnsureForPresetSlice(sliceJson, sourceHostUid);
+                VamOnDemandLoader.ForceRunPendingCoalescedVamRefresh(reason);
+            }
+            catch (System.Exception ex)
+            {
+                // Importing what resolves beats aborting the whole spawn on one bad package.
+                LogUtil.LogWarning("[VPB import] Slice dependency prep failed (" + reason + "): " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Builds a minimal scene-shaped JSON holding only the atoms named by <paramref name="atomIds"/>
+        /// (all atoms when null), so dependency prep scans the slice being imported rather than the
+        /// whole scene's dependency graph.
+        /// </summary>
+        private static JSONClass BuildAtomSliceForDependencyPrep(JSONClass scene, ICollection<string> atomIds)
+        {
+            JSONArray atoms = scene["atoms"] as JSONArray;
+            if (atoms == null || atoms.Count == 0) return null;
+
+            JSONArray kept = new JSONArray();
+            for (int i = 0; i < atoms.Count; i++)
+            {
+                JSONClass atom = atoms[i] as JSONClass;
+                if (atom == null) continue;
+                if (atomIds != null)
+                {
+                    string id = atom["id"] != null ? atom["id"].Value : null;
+                    if (string.IsNullOrEmpty(id) || !atomIds.Contains(id)) continue;
+                }
+                kept.Add(atom);
+            }
+            if (kept.Count == 0) return null;
+
+            JSONClass slice = new JSONClass();
+            slice["atoms"] = kept;
+            return slice;
+        }
+
         // Maps toolbox AppearanceClothingApplyMode → ClothingApplyMode for Appearance-type imports.
         // Outfit Only (clothingonly) is not an Appearance import — mapping it to ClothingOnly skipped
         // skin/hair/morphs. Keep / Merge Outfit / Full Look (replace) only.
@@ -2409,6 +2467,10 @@ namespace VPB
                 LogUtil.LogWarning("[VPB][CUA] picker on but nothing checked; skipping CUA import.");
                 return;
             }
+            // CUAs carry their own asset packages, which the source scene's declared dependency set
+            // can omit. Activate and register them before the spawn or the assets load as missing.
+            PrepareImportSliceDependencies(scene, selectedIds, sourceHostUid, "vpb_import_cua_slice_prewarm");
+
             StartCoroutine(VPB.src.util.CUAAtomImporter.ImportSelectedCUAsAsAtoms(
                 scene, sourceAtomId, target, sourceHostUid, selectedIds,
                 importSidebarCUARelativeToPerson, replaceExisting: !importSidebarCuaMergeLoad));
@@ -2583,6 +2645,10 @@ namespace VPB
             Dictionary<string, Dictionary<string, string>> receiverRemapByUid)
         {
             if (scene == null || selectedIds == null || selectedIds.Count == 0) return;
+
+            // Single funnel for both the direct and post-remap spawn paths, so preparing here covers
+            // every scene-atom import exactly once and only when the import actually proceeds.
+            PrepareImportSliceDependencies(scene, selectedIds, sourceHostUid, "vpb_import_atoms_slice_prewarm");
 
             int recvCount = 0;
             if (receiverRemapByUid != null)
