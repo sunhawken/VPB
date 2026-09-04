@@ -936,7 +936,9 @@ namespace VPB
                 string k = file.Uid;
                 if (string.IsNullOrEmpty(k)) k = file.Path;
                 if (string.IsNullOrEmpty(k)) return "";
-                return (k.Replace('\\', '/').Trim()).ToLowerInvariant();
+                // Path fallback (and any entry built before its package resolved) can still carry the
+                // archive file name — .var / .DISABLED / .var.disabled — instead of the package UID.
+                return CanonicalizeUsageKey((k.Replace('\\', '/').Trim()).ToLowerInvariant());
             }
             catch
             {

@@ -2225,6 +2225,48 @@ namespace VPB
                 StartImportSelectedSceneAtoms(sourceHostUid);
         }
 
+        /// <summary>
+        /// History kind for an import-slider type, using the same vocabulary as the drag-drop apply paths
+        /// (<see cref="GalleryUIUtils"/>) so one package's usage lands in one row per kind no matter which
+        /// path the user took to apply it.
+        /// </summary>
+        private static string HistoryKindForImportType(VpbResourceType type)
+        {
+            switch (type)
+            {
+                case VpbResourceType.Appearance: return "appearance";
+                case VpbResourceType.Clothing:
+                case VpbResourceType.ClothingItem: return "clothing";
+                case VpbResourceType.Hair:
+                case VpbResourceType.HairItem: return "hair";
+                case VpbResourceType.Pose: return "pose";
+                case VpbResourceType.Morphs: return "morphs";
+                case VpbResourceType.Skin: return "skin";
+                case VpbResourceType.Plugins: return "plugins";
+                case VpbResourceType.CUA: return "cua";
+                case VpbResourceType.Atoms: return "scene";
+                default: return "item";
+            }
+        }
+
+        /// <summary>
+        /// Records the import slider's source package in <c>item_usage</c>. The sidebar applies presets from
+        /// scene JSON through <see cref="VpbImport.LoadPreset"/>, which bypasses the VaM preset/appearance
+        /// hooks that feed History elsewhere — so without this, everything imported through the slider
+        /// (very much including <c>.DISABLED</c> and sidecar-disabled packages) never counted as used.
+        /// </summary>
+        private void RecordImportSidebarUsage(FileEntry source, string kind)
+        {
+            if (source == null) return;
+            try
+            {
+                string key = VpbLocalDatabase.BuildUsageKey(source);
+                if (string.IsNullOrEmpty(key)) return;
+                VpbLocalDatabase.TryRecordItemUse(key, kind);
+            }
+            catch { }
+        }
+
         private void ApplyOneTypeImport(VpbResourceType type, string sourceHostUid)
         {
             if (!IsImportTypeAvailable(type)) return;
@@ -2432,6 +2474,9 @@ namespace VPB
             // delete only catches pre-existing atoms, and import + delete compose into "replace".
             if (type == VpbResourceType.Appearance && importSidebarDeleteTargetCUAs)
                 DeleteTargetLinkedCUAs(importSidebarTargetAtom);
+
+            // Past every early return above, so only an import that actually applied is counted.
+            RecordImportSidebarUsage(importSidebarSourceScene, HistoryKindForImportType(type));
         }
 
         // Reads the whole source scene (CUAs are separate atoms) and spawns each person-linked CUA as a native atom.
@@ -2477,6 +2522,8 @@ namespace VPB
             // CUAs carry their own asset packages, which the source scene's declared dependency set
             // can omit. Activate and register them before the spawn or the assets load as missing.
             PrepareImportSliceDependencies(scene, selectedIds, sourceHostUid, "vpb_import_cua_slice_prewarm");
+
+            RecordImportSidebarUsage(source, "cua");
 
             StartCoroutine(VPB.src.util.CUAAtomImporter.ImportSelectedCUAsAsAtoms(
                 scene, sourceAtomId, target, sourceHostUid, selectedIds,
@@ -2673,6 +2720,8 @@ namespace VPB
                 + " hostUid='" + (sourceHostUid ?? "") + "'"
                 + " uidRemap=" + (uidRemap != null ? uidRemap.Count.ToString() : "0")
                 + " receiverRemap=" + recvCount.ToString());
+
+            RecordImportSidebarUsage(importSidebarSourceScene, HistoryKindForImportType(VpbResourceType.Atoms));
 
             StartCoroutine(SceneAtomImporter.ImportSelectedAtoms(
                 scene, importSidebarSourceAtomId, importSidebarTargetAtom, sourceHostUid,
