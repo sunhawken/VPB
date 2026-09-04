@@ -28,12 +28,78 @@ namespace VPB
                 }
                 catch { }
                 if (string.IsNullOrEmpty(k)) return "";
-                return k.Replace('\\', '/').Trim().ToLowerInvariant();
+                return CanonicalizeUsageKey(k.Replace('\\', '/').Trim().ToLowerInvariant());
             }
             catch
             {
                 return "";
             }
+        }
+
+        private static readonly char[] s_UsageKeyPathSeparators = new[] { '/', '\\' };
+
+        /// <summary>
+        /// Collapse the package half of an <c>item_usage.item_key</c> to the canonical package UID.
+        /// <para>
+        /// The same package reaches this code under several spellings depending on whether it was
+        /// registered when the key was built: the UID (<c>author.pkg.1:/…</c>), the archive file name
+        /// (<c>author.pkg.1.var:/…</c>, <c>author.pkg.1.disabled:/…</c>, <c>author.pkg.1.var.disabled:/…</c>)
+        /// or a full archive path. A <c>.var</c> disabled by its <c>.disabled</c> sidecar registers with no
+        /// file entries at all, so <see cref="FileManager.NormalizePath"/> cannot resolve it and hands back
+        /// the raw path. Left alone, one package accrues usage under several keys and none of them join
+        /// <c>pkg</c>, so it is missing from History and from usage-count sort.
+        /// </para>
+        /// Keys that do not name a package (loose <c>Saves/</c> and <c>Custom/</c> files) are returned unchanged.
+        /// </summary>
+        internal static string CanonicalizeUsageKey(string itemKey)
+        {
+            if (string.IsNullOrEmpty(itemKey)) return itemKey ?? "";
+            try
+            {
+                // Last separator, not first: a full Windows archive path carries a drive-letter ":/" too.
+                int sep = itemKey.LastIndexOf(":/", StringComparison.Ordinal);
+                if (sep <= 0) return itemKey;
+
+                string prefix = itemKey.Substring(0, sep);
+                int slash = prefix.LastIndexOfAny(s_UsageKeyPathSeparators);
+                if (slash >= 0) prefix = prefix.Substring(slash + 1);
+                if (prefix.Length == 0) return itemKey;
+
+                string uid = StripPackageArchiveSuffixes(prefix);
+                if (!LooksLikePackageUid(uid)) return itemKey;
+
+                return uid.ToLowerInvariant() + ":/" + itemKey.Substring(sep + 2);
+            }
+            catch
+            {
+                return itemKey;
+            }
+        }
+
+        /// <summary>Strips <c>.disabled</c>, then one <c>.var</c> / <c>.zip</c>, so <c>x.var.disabled</c> also reduces to <c>x</c>.</summary>
+        private static string StripPackageArchiveSuffixes(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return name ?? "";
+            string s = name;
+            if (s.EndsWith(".disabled", StringComparison.OrdinalIgnoreCase))
+                s = s.Substring(0, s.Length - 9);
+            if (s.EndsWith(".var", StringComparison.OrdinalIgnoreCase)
+                || s.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                s = s.Substring(0, s.Length - 4);
+            return s;
+        }
+
+        /// <summary>True for <c>Creator.Name.&lt;version|latest&gt;</c> — the shape <c>pkg.uid</c> stores.</summary>
+        private static bool LooksLikePackageUid(string uid)
+        {
+            if (string.IsNullOrEmpty(uid)) return false;
+            string[] parts = uid.Split('.');
+            if (parts.Length != 3) return false;
+            if (parts[0].Length == 0 || parts[1].Length == 0 || parts[2].Length == 0) return false;
+            if (string.Equals(parts[2], "latest", StringComparison.OrdinalIgnoreCase)) return true;
+            for (int i = 0; i < parts[2].Length; i++)
+                if (parts[2][i] < '0' || parts[2][i] > '9') return false;
+            return true;
         }
 
         /// <summary>
