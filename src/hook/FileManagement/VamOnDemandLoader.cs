@@ -208,6 +208,17 @@ namespace VPB
                         return null;
                     }
 
+                    // RAM disk first when one is mounted. RamDiskAuto stages only *.var, so every
+                    // .DISABLED archive is invisible to it; this is the only tier that can put them
+                    // in RAM. A hard link cannot reach another volume, so this must be a copy.
+                    string ramPath;
+                    if (VpbRamDiskStaging.TryStageDisabledArchive(archivePath, uid, out ramPath)
+                        && !string.IsNullOrEmpty(ramPath))
+                    {
+                        s_LinkByArchivePath[archivePath] = ramPath;
+                        return ramPath;
+                    }
+
                     Directory.CreateDirectory(OnDemandLinkDirectory);
                     string linkPath = NormalizePath(Path.Combine(OnDemandLinkDirectory, uid + ".var"));
 
@@ -3081,6 +3092,7 @@ namespace VPB
                 .Append(" invoke_ms_total=").Append(ms)
                 .Append(" cooldown_ms=").Append(FailedRetryCooldownMs)
                 .Append(" top_fail_uids=").Append(string.IsNullOrEmpty(topFail) ? "(none)" : topFail);
+            try { summary.Append(' ').Append(VpbRamDiskStaging.DescribeState()); } catch { }
             AppendPathRewriteProbeSummaryIfNeeded(summary);
             int catalogProbes = Interlocked.CompareExchange(ref s_CatalogMetaJsonProbeSuppressed, 0, 0);
             if (ready && catalogProbes > 0 && s_CatalogMetaJsonProbeNoticeLogged)

@@ -663,6 +663,8 @@ namespace VPB
         void OnDestroy()
         {
             try { VpbPerfController.Shutdown(); } catch { }
+            // RAM-disk copies are disposable and cost real memory; the disk can outlive VaM.
+            try { VpbRamDiskStaging.ReleaseAll(); } catch { }
             try
             {
                 var sc = SuperController.singleton;

@@ -598,6 +598,7 @@
     <Compile Include="src\hook\FileManagement\PackageReferenceVersionResolver.cs" />
     <Compile Include="src\hook\FileManagement\VamScanFilter.cs" />
     <Compile Include="src\hook\FileManagement\VamOnDemandLoader.cs" />
+    <Compile Include="src\hook\FileManagement\VpbRamDiskStaging.cs" />
     <Compile Include="src\ScanWhitelistManager.cs" />
     <Compile Include="src\hook\Hub\HubBrowse.cs" />
     <Compile Include="src\hook\Hub\HubResourceCreatorSupportUI.cs" />
