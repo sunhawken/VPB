@@ -92,6 +92,10 @@ namespace VPB
 
         public ConfigEntry<string> HubHostedOption;
         public ConfigEntry<string> HubPayTypeFilter;
+        public ConfigEntry<bool> RamDiskStagingEnabled;
+        public ConfigEntry<int> RamDiskStagingBudgetMB;
+        public ConfigEntry<int> RamDiskStagingMinFreeMB;
+        public ConfigEntry<string> RamDiskStagingRootOverride;
         public ConfigEntry<string> HubCategoryFilter;
         public ConfigEntry<string> HubCreatorFilter;
         public ConfigEntry<string> HubTagsFilter;
@@ -210,6 +214,10 @@ namespace VPB
             LogPerfTelemetry = config.Bind<bool>("Logging", "LogPerfTelemetry", false, "Emit a periodic VPB_PERF_TELEMETRY line with cache sizes, queue depths, panel scroll-listener counts, and heap stats. Enable when diagnosing progressive FPS degradation.");
             LogPerfTelemetryIntervalSeconds = config.Bind<int>("Logging", "LogPerfTelemetryIntervalSeconds", 30, "Seconds between VPB_PERF_TELEMETRY snapshots (clamped 1-30). Only used when LogPerfTelemetry is enabled.");
             LogPerfDiagnostics = config.Bind<bool>("Logging", "LogPerfDiagnostics", false, "Emit a 1Hz VPB.Diag line with per-frame call counters (quick-menu refresh, icon GO churn, gallery Update gating, pointer sibling reorders) plus one-shot transition logs for show/hide/menu-gate. Enable temporarily to pinpoint frame-cost hotspots; disable for normal use.");
+            RamDiskStagingEnabled = config.Bind<bool>("RamDisk", "StageDisabledPackages", true, "When a RAM disk is mounted (RamDiskAuto), copy .DISABLED archives there for on-demand registration instead of hard-linking them under Cache/VPB/ondemand. RamDiskAuto stages only *.var, so .DISABLED packages get no RAM benefit without this. No effect when no RAM disk is present.");
+            RamDiskStagingBudgetMB = config.Bind<int>("RamDisk", "StagingBudgetMB", 768, "Maximum RAM-disk space VPB will use for staged .DISABLED packages (MB, clamped 0-65536). Least-recently-staged copies are evicted first. Keep well below RamDiskAuto's own 3.25GB package budget.");
+            RamDiskStagingMinFreeMB = config.Bind<int>("RamDisk", "StagingMinFreeMB", 1536, "Free RAM-disk space VPB refuses to consume (MB, clamped 256-262144). Defaults above RamDiskAuto's 1GB MIN_FREE_BYTES so its own staging never starves because of VPB.");
+            RamDiskStagingRootOverride = config.Bind<string>("RamDisk", "RamRootOverride", "", "Leave empty to read RamRoot from BepInEx/config/trey.ramdisk.auto.cfg (falling back to Z:\\VaM-RamDisk). Set only to point VPB at a different RAM disk than RamDiskAuto uses.");
             PerfSilenceVaMPerfMon = config.Bind<bool>("Performance", "SilenceVaMPerfMonOnPerfPreset", true, "When gallery perf preset P1/P2 is active, silence MeshVR PerfMon camera/pre update hooks (reduces overlay cost).");
             PerfDetectGiveMeFpsConflict = config.Bind<bool>("Performance", "DetectGiveMeFpsConflict", true, "Log a one-time warning if Redeyes GiveMeFPS session plugin is loaded alongside VPB perf presets.");
             LogSavePerf = config.Bind<bool>("Logging", "LogSavePerf", false, "Log scene-save timing split: bridge prep vs native SaveScene invocation. Enable when diagnosing save-time regressions vs native VaM baseline.");
