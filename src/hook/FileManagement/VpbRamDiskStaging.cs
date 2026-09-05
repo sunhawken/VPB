@@ -126,29 +126,37 @@ namespace VPB
 
                 try
                 {
-                    if (!IsEnabled) return null;
-
                     string root = ResolveRamRoot();
                     if (string.IsNullOrEmpty(root)) return null;
                     if (!Directory.Exists(root))
                     {
-                        LogUtil.Log("[VPB RamDisk] RamRoot '" + root + "' not present; using local hard links.");
+                        if (IsEnabled)
+                            LogUtil.Log("[VPB RamDisk] RamRoot '" + root + "' not present; using local hard links.");
                         return null;
                     }
 
                     string stage = Path.Combine(root, VpbRamSubdirectory.Replace('/', Path.DirectorySeparatorChar));
-                    Directory.CreateDirectory(stage);
 
-                    // Leftovers from a crash or a Windows restart: the RAM disk may survive a VaM
-                    // exit, and a stale <uid>.var whose archive has since changed would register the
-                    // wrong bytes. Start every session from an empty stage.
-                    int removed = ClearDirectoryFiles(stage);
+                    // Reclaim leftovers BEFORE honouring the enable flag. A hard kill (the launcher's
+                    // taskkill path) or a Windows restart skips OnDestroy, so copies survive on a RAM
+                    // disk that outlives VaM. Gating this behind IsEnabled meant turning the feature
+                    // off stranded that space permanently, with nothing left running to reclaim it.
+                    // A stale <uid>.var is also unsafe to keep: its archive may have changed since.
+                    if (Directory.Exists(stage))
+                    {
+                        int stale = ClearDirectoryFiles(stage);
+                        if (stale > 0)
+                            LogUtil.Log("[VPB RamDisk] Reclaimed " + stale + " stale staged package(s) from '" + stage + "'.");
+                    }
+
+                    if (!IsEnabled) return null;
+
+                    Directory.CreateDirectory(stage);
 
                     s_RamStageDirectory = stage;
                     LogUtil.Log("[VPB RamDisk] Staging .DISABLED packages at '" + stage
                         + "' (budget=" + FormatMB(MaxStageBytes) + " reserve=" + FormatMB(MinFreeBytes)
-                        + " free=" + FormatMB(GetFreeBytes(stage))
-                        + (removed > 0 ? " cleared_stale=" + removed : "") + ")");
+                        + " free=" + FormatMB(GetFreeBytes(stage)) + ")");
                     return s_RamStageDirectory;
                 }
                 catch (Exception ex)
@@ -390,6 +398,16 @@ namespace VPB
         {
             if (bytes < 0) return "?";
             return (bytes / (1024.0 * 1024.0)).ToString("F0", CultureInfo.InvariantCulture) + "MB";
+        }
+
+        /// <summary>
+        /// Runs the probe once at startup. Called even when staging is disabled: the probe is what
+        /// reclaims copies stranded by a hard kill, and a session with no <c>.DISABLED</c>
+        /// registration would otherwise never reach it.
+        /// </summary>
+        internal static void InitializeAtStartup()
+        {
+            try { GetRamStageDirectory(); } catch { }
         }
 
         /// <summary>One-line summary for the on-demand startup checkpoint.</summary>

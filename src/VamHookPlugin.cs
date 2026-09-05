@@ -390,6 +390,8 @@ namespace VPB
                     Settings.Instance.ForceLatestDependencies.Value = true;
             }
             catch { }
+            // Runs even when staging is off — this is what reclaims RAM copies a hard kill stranded.
+            try { VpbRamDiskStaging.InitializeAtStartup(); } catch { }
             try { QuickMenuMigrateAnchorBaselineOnce(); } catch { }
             try
             {
