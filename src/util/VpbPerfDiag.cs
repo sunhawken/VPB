@@ -194,8 +194,99 @@ namespace VPB
                     loopFps,
                     fxHook, fxHeavy, getVar, scriptCtrl, getVarHeavy);
                 LogUtil.LogWarning(msg);
+                EmitHoverSplit(dt);
             }
             catch { }
         }
+
+        #region Hover attribution
+
+        // "Slow while the pointer is over the panel" cannot be attributed from an averaged FPS
+        // number: hover and non-hover frames are mixed together. Split them, so the cost of
+        // hovering is a measured delta rather than an impression.
+        static int _hoverFrames, _noHoverFrames;
+        static double _hoverMs, _noHoverMs;
+        static float _hoverWorstMs, _noHoverWorstMs;
+        static int _uiGraphics = -1, _uiRaycastTargets = -1;
+        static int _lastClaimedFrame = -1;
+        static float _nextCanvasSampleRealtime;
+
+        /// <summary>
+        /// Several <see cref="GalleryPanel"/> instances tick per frame; only the first may account for it,
+        /// or one frame would be counted once per open panel.
+        /// </summary>
+        public static bool TryClaimFrame(int frameCount)
+        {
+            if (frameCount == _lastClaimedFrame) return false;
+            _lastClaimedFrame = frameCount;
+            return true;
+        }
+
+        public static void AccumulateGalleryHoverFrame(bool pointerInside, float unscaledDeltaTime)
+        {
+            float ms = unscaledDeltaTime * 1000f;
+            if (ms <= 0f || ms > 2000f) return; // ignore load hitches / first frame
+            if (pointerInside)
+            {
+                _hoverFrames++;
+                _hoverMs += ms;
+                if (ms > _hoverWorstMs) _hoverWorstMs = ms;
+            }
+            else
+            {
+                _noHoverFrames++;
+                _noHoverMs += ms;
+                if (ms > _noHoverWorstMs) _noHoverWorstMs = ms;
+            }
+        }
+
+        /// <summary>Walking every Graphic is not free; gate it to once per second.</summary>
+        public static bool ShouldSampleGalleryCanvas()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (now < _nextCanvasSampleRealtime) return false;
+            _nextCanvasSampleRealtime = now + IntervalSeconds;
+            return true;
+        }
+
+        /// <summary>
+        /// Graphic / raycast-target population of the open panel. The raycast-target count is the
+        /// per-frame workload <c>GraphicRaycaster</c> walks while the pointer is over the canvas, so a
+        /// large number here is the first thing to explain hover-only input lag.
+        /// </summary>
+        public static void SetGalleryCanvasSample(int graphics, int raycastTargets)
+        {
+            _uiGraphics = graphics;
+            _uiRaycastTargets = raycastTargets;
+        }
+
+        static void EmitHoverSplit(float dt)
+        {
+            try
+            {
+                if (_hoverFrames == 0 && _noHoverFrames == 0) return;
+
+                float hoverAvg = _hoverFrames > 0 ? (float)(_hoverMs / _hoverFrames) : 0f;
+                float noHoverAvg = _noHoverFrames > 0 ? (float)(_noHoverMs / _noHoverFrames) : 0f;
+                float hoverFps = hoverAvg > 0.0001f ? 1000f / hoverAvg : 0f;
+                float noHoverFps = noHoverAvg > 0.0001f ? 1000f / noHoverAvg : 0f;
+
+                LogUtil.LogWarning(string.Format(
+                    "[VPB.Diag.Hover] over_panel: frames={0} avg={1:0.00}ms worst={2:0.00}ms fps={3:0.0}"
+                    + " | off_panel: frames={4} avg={5:0.00}ms worst={6:0.00}ms fps={7:0.0}"
+                    + " | hover_cost={8:0.00}ms/frame | uiGraphics={9} uiRaycastTargets={10}",
+                    _hoverFrames, hoverAvg, _hoverWorstMs, hoverFps,
+                    _noHoverFrames, noHoverAvg, _noHoverWorstMs, noHoverFps,
+                    (_hoverFrames > 0 && _noHoverFrames > 0) ? (hoverAvg - noHoverAvg) : 0f,
+                    _uiGraphics, _uiRaycastTargets));
+
+                _hoverFrames = 0; _noHoverFrames = 0;
+                _hoverMs = 0.0; _noHoverMs = 0.0;
+                _hoverWorstMs = 0f; _noHoverWorstMs = 0f;
+            }
+            catch { }
+        }
+
+        #endregion
     }
 }
