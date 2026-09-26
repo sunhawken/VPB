@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -1159,7 +1159,18 @@ namespace VPB
             catch { }
 
             if (!GeometryCatalogContainsEntry(atom, entry, normalizedPath, hair))
+            {
+                // Keep the queued native refresh: it is the only thing that will put this item in the
+                // catalog. Logged because silently declining here used to be indistinguishable from
+                // wrongly cancelling, which is exactly how the .DISABLED apply failure hid.
+                try
+                {
+                    LogUtil.Log("[VPB OnDemand] Light clothing/hair catalog does NOT have "
+                        + (normalizedPath ?? "") + " — keeping queued native FileManager.Refresh.");
+                }
+                catch { }
                 return false;
+            }
 
             VamOnDemandLoader.CancelPendingCoalescedVamRefresh("light_clothing_hair_catalog_ready");
             try
@@ -1170,74 +1181,93 @@ namespace VPB
             return true;
         }
 
+        /// <summary>
+        /// True only when the geometry catalog can actually resolve THIS item, i.e. the
+        /// <c>clothing:&lt;itemUid&gt;</c> / <c>hair:&lt;itemUid&gt;</c> bool the apply path toggles exists.
+        /// <para>
+        /// Do NOT use <c>DAZCharacterSelector.IsClothingUIDAvailable</c> here. Despite the name it is a
+        /// free-id collision check: its IL is <c>return !_clothingItemById.ContainsKey(uid)</c>, so it
+        /// returns <b>true when the item is absent</b> — the opposite of "catalog has it". Called with a
+        /// bare package UID (never a dictionary key) it returned true unconditionally, so the caller
+        /// cancelled the pending native FileManager.Refresh for every clothing/hair apply. Packages
+        /// already registered at startup survived that; a package registered on demand (every
+        /// <c>.DISABLED</c> one) never got its items into the catalog, the bool never appeared, and the
+        /// apply silently did nothing — "Deferred toggle timed out waiting for param".
+        /// </para>
+        /// Matching is exact per candidate UID: a sibling item from the same package being present must
+        /// not count as this item being ready.
+        /// </summary>
         static bool GeometryCatalogContainsEntry(Atom atom, FileEntry entry, string normalizedPath, bool hair)
         {
             if (atom == null) return false;
             var selector = atom.GetStorableByID("geometry") as DAZCharacterSelector;
             if (selector == null) return false;
 
-            // Prefer package UID from entry / path (clothing:PkgUid:/Custom/...).
-            string pkgUid = null;
-            try
+            string prefix = hair ? "hair:" : "clothing:";
+            foreach (string uid in EnumerateCatalogItemUidCandidates(entry, normalizedPath))
             {
-                if (entry != null && !string.IsNullOrEmpty(entry.Uid))
-                {
-                    string u = entry.Uid.Replace('\\', '/');
-                    int colon = u.IndexOf(":/", StringComparison.Ordinal);
-                    pkgUid = colon > 0 ? u.Substring(0, colon) : null;
-                }
-            }
-            catch { }
+                if (string.IsNullOrEmpty(uid)) continue;
 
-            if (string.IsNullOrEmpty(pkgUid) && !string.IsNullOrEmpty(normalizedPath))
+                // The bool the toggle will set. Exact name, no substring matching.
+                try { if (selector.GetBoolJSONParam(prefix + uid) != null) return true; }
+                catch { }
+
+                // Registry lookup, inverted deliberately: "not available" == present in the catalog.
+                try
+                {
+                    if (hair) { if (!selector.IsHairUIDAvailable(uid)) return true; }
+                    else { if (!selector.IsClothingUIDAvailable(uid)) return true; }
+                }
+                catch { }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// UID spellings the catalog may hold for one entry: the package-qualified UID
+        /// (<c>Pkg.Name.1:/Custom/Clothing/...vam</c>), the package-stripped path for loose items, and the
+        /// <c>.vaj</c> sibling — the same set <see cref="ApplyClothingToAtom"/> tries when toggling.
+        /// </summary>
+        static IEnumerable<string> EnumerateCatalogItemUidCandidates(FileEntry entry, string normalizedPath)
+        {
+            var seen = new List<string>(6);
+            Action<string> add = u =>
+            {
+                if (string.IsNullOrEmpty(u)) return;
+                for (int i = 0; i < seen.Count; i++)
+                    if (string.Equals(seen[i], u, StringComparison.OrdinalIgnoreCase)) return;
+                seen.Add(u);
+            };
+
+            string full = null;
+            try { if (entry != null && !string.IsNullOrEmpty(entry.Uid)) full = entry.Uid.Replace('\\', '/'); }
+            catch { }
+            if (string.IsNullOrEmpty(full) && !string.IsNullOrEmpty(normalizedPath))
+                full = normalizedPath.Replace('\\', '/');
+
+            if (!string.IsNullOrEmpty(full))
+            {
+                add(full);
+                int colon = full.IndexOf(":/", StringComparison.Ordinal);
+                if (colon > 0 && colon + 2 < full.Length) add(full.Substring(colon + 2));
+            }
+
+            if (!string.IsNullOrEmpty(normalizedPath))
             {
                 string p = normalizedPath.Replace('\\', '/');
+                add(p);
                 int colon = p.IndexOf(":/", StringComparison.Ordinal);
-                if (colon > 0) pkgUid = p.Substring(0, colon);
+                if (colon > 0 && colon + 2 < p.Length) add(p.Substring(colon + 2));
             }
 
-            if (!string.IsNullOrEmpty(pkgUid))
+            int baseCount = seen.Count;
+            for (int i = 0; i < baseCount; i++)
             {
-                try
-                {
-                    if (!hair && selector.IsClothingUIDAvailable(pkgUid)) return true;
-                }
-                catch { }
-                try
-                {
-                    var clothing = atom.GetStorableByID("Clothing") as DAZClothingItemControl;
-                    if (!hair && clothing != null && clothing.IsClothingUIDAvailable(pkgUid)) return true;
-                }
-                catch { }
+                string u = seen[i];
+                if (u.EndsWith(".vam", StringComparison.OrdinalIgnoreCase))
+                    add(u.Substring(0, u.Length - 4) + ".vaj");
             }
-
-            // Fallback: any clothing:/hair: bool whose name contains package uid or leaf folder.
-            try
-            {
-                string prefix = hair ? "hair:" : "clothing:";
-                string needle = pkgUid;
-                if (string.IsNullOrEmpty(needle) && !string.IsNullOrEmpty(normalizedPath))
-                {
-                    string p = normalizedPath.Replace('\\', '/');
-                    int slash = p.LastIndexOf('/');
-                    if (slash > 0 && slash + 1 < p.Length)
-                        needle = p.Substring(slash + 1);
-                    if (!string.IsNullOrEmpty(needle) && needle.EndsWith(".vam", StringComparison.OrdinalIgnoreCase))
-                        needle = needle.Substring(0, needle.Length - 4);
-                }
-                if (string.IsNullOrEmpty(needle)) return false;
-
-                foreach (string name in selector.GetBoolParamNames())
-                {
-                    if (string.IsNullOrEmpty(name) || !name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    if (name.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0)
-                        return true;
-                }
-            }
-            catch { }
-
-            return false;
+            return seen;
         }
 
         private void CreateGhost(PointerEventData eventData)
