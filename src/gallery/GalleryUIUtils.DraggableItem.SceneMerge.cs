@@ -352,6 +352,19 @@ namespace VPB
                             // before one-shot preset/material lookup work starts.
                             VamOnDemandLoader.FlushPendingRegistrationsNow();
                             VamOnDemandLoader.ForceRunPendingCoalescedVamRefresh("pre_apply_prewarm_flush");
+
+                            // The native refresh only makes the package's files visible to FileManager.
+                            // DAZCharacterSelector caches its own item catalog, and the light attempt
+                            // above already ran (and legitimately found nothing) BEFORE that refresh —
+                            // so without rebuilding here the catalog stays stale, no clothing:<uid>
+                            // bool is ever created, and the apply dead-ends in the deferred-toggle
+                            // timeout. Order matters: FileManager first, DAZ catalog second.
+                            if (IsClothingOrHairApplyType(itemType))
+                            {
+                                try { VamOnDemandLoader.RefreshPersonClothingHairCatalogs(atom); }
+                                catch (Exception exCat)
+                                { LogUtil.LogWarning("[VPB OnDemand] Post-refresh catalog rebuild failed: " + exCat.Message); }
+                            }
                         }
                     }
                 }
@@ -976,6 +989,9 @@ namespace VPB
             }
         }
 
+        /// <summary>Catalog rebuilds are not free (they re-scan every clothing/hair item), so cap them.</summary>
+        private const int MaxDeferredCatalogRebuilds = 4;
+
         private IEnumerator RetryLegacyToggleAfterRefreshCoroutine(string atomUid, string legacyPath, string normalizedPath, string ext, int applySerial)
         {
             try
@@ -985,6 +1001,8 @@ namespace VPB
 
                 DateTime start = DateTime.UtcNow;
                 bool loggedWait = false;
+                int catalogRebuilds = 0;
+                DateTime lastRebuild = DateTime.MinValue;
                 while ((DateTime.UtcNow - start).TotalSeconds < 5.0)
                 {
                     if (!GalleryPanel.IsClothingApplySerialCurrent(applySerial)) yield break;
@@ -1019,10 +1037,27 @@ namespace VPB
                         loggedWait = true;
                     }
 
+                    // Polling alone can never succeed: nothing else rebuilds the DAZ item catalog once
+                    // the native refresh lands, so the bool would never appear no matter how long we
+                    // wait. Rebuild it a bounded number of times (it is not free) while we poll.
+                    if (catalogRebuilds < MaxDeferredCatalogRebuilds
+                        && (DateTime.UtcNow - lastRebuild).TotalSeconds >= 0.75)
+                    {
+                        catalogRebuilds++;
+                        lastRebuild = DateTime.UtcNow;
+                        LogUtil.Log($"[DragDropDebug] Deferred toggle rebuilding clothing/hair catalog (attempt {catalogRebuilds}/{MaxDeferredCatalogRebuilds}).");
+                        bool rebuilt = false;
+                        try { VamOnDemandLoader.RefreshPersonClothingHairCatalogs(atom); rebuilt = true; }
+                        catch (Exception exCat)
+                        { LogUtil.LogWarning("[DragDropDebug] Deferred catalog rebuild failed: " + exCat.Message); }
+                        if (rebuilt) yield return null; // let the rebuild register its params
+                    }
+
                     yield return new WaitForSeconds(0.15f);
                 }
 
-                LogUtil.LogWarning($"[DragDropDebug] Deferred toggle timed out waiting for param: {legacyPath}");
+                LogUtil.LogWarning($"[DragDropDebug] Deferred toggle timed out waiting for param: {legacyPath}"
+                    + " (catalog rebuilds attempted: " + catalogRebuilds + ")");
             }
             finally
             {
