@@ -1094,6 +1094,24 @@ namespace VPB
         {
             if (buttonGO == null) return;
 
+            Transform existingIconTr = null;
+            try { existingIconTr = buttonGO.transform.Find("Icon"); } catch { }
+
+            // Fast path before any other hierarchy search: nothing to change. The "Label" lookup below
+            // is a string Find() that used to run on every call — two per slot per frame under the
+            // per-frame refresh loop — while only ever mattering when an icon replaces a text slot.
+            if (icon != null && existingIconTr != null)
+            {
+                Image fastImg = existingIconTr.GetComponent<Image>();
+                RectTransform fastRT = existingIconTr.GetComponent<RectTransform>();
+                if (fastImg != null && fastRT != null
+                    && fastImg.sprite == icon
+                    && fastRT.sizeDelta == new Vector2(-padding * 2f, -padding * 2f))
+                {
+                    return;
+                }
+            }
+
             // Remove any label; icon-only buttons should not retain stale text across pages.
             try
             {
@@ -1101,9 +1119,6 @@ namespace VPB
                 if (labelTr != null) DestroyImmediate(labelTr.gameObject);
             }
             catch { }
-
-            Transform existingIconTr = null;
-            try { existingIconTr = buttonGO.transform.Find("Icon"); } catch { }
 
             if (icon == null)
             {
@@ -1201,12 +1216,21 @@ namespace VPB
             catch { return true; }
         }
 
+        /// <summary>
+        /// Writes only on change. Assigning <see cref="Graphic.color"/> marks the graphic dirty and forces
+        /// the quick-menu canvas to re-batch, so the old unconditional write rebuilt that canvas every
+        /// frame — measured at ~100 slot refreshes/second with nothing on screen changing.
+        /// </summary>
         private static void QuickMenuApplyBackdropColors(Image bg, Color normal, Color hover)
         {
             if (bg == null) return;
-            bg.color = normal;
+            if (bg.color != normal) bg.color = normal;
             var hh = bg.GetComponent<QuickMenuSquareHover>();
-            if (hh != null) { hh.normal = normal; hh.hover = hover; }
+            if (hh != null)
+            {
+                if (hh.normal != normal) hh.normal = normal;
+                if (hh.hover != hover) hh.hover = hover;
+            }
         }
 
         private void QuickMenuRefreshSlotVisual(int idx)

@@ -1127,6 +1127,13 @@ namespace VPB
                 }
 
                 // Keep icon visuals current (Show/Hide toggles eye icon based on visibility).
+                // Four Hz, matching the overlay-chrome maintenance cadence: this loop is a fallback for
+                // state that changed without telling us, and every direct user action already calls
+                // QuickMenuRefreshSlotVisual itself, so interactive feedback stays immediate. Per-frame
+                // it measured ~100 slot refreshes/second (VPB.Diag qmRefresh=101/s) with nothing changing.
+                bool refreshQuickMenuSlotVisuals = Time.unscaledTime >= m_NextQuickMenuSlotVisualRefreshTime;
+                if (refreshQuickMenuSlotVisuals)
+                    m_NextQuickMenuSlotVisualRefreshTime = Time.unscaledTime + 0.25f;
                 try
                 {
                     if (m_QuickMenuGridButtons != null)
@@ -1143,13 +1150,14 @@ namespace VPB
                                 if (go != null && go.activeSelf != shouldShow) go.SetActive(shouldShow);
                             }
 
-                            if (a == QuickMenuAssignableAction.ShowHide ||
-                                a == QuickMenuAssignableAction.ReplaceAddToggle ||
-                                a == QuickMenuAssignableAction.AutoHideGallery ||
-                                a == QuickMenuAssignableAction.ShowHiddenPackages ||
-                                a == QuickMenuAssignableAction.FpsCounter ||
-                                i == m_QuickMenuEditSlotIdx ||
-                                i == m_QuickMenuPageToggleSlotIdx)
+                            if (refreshQuickMenuSlotVisuals
+                                && (a == QuickMenuAssignableAction.ShowHide ||
+                                    a == QuickMenuAssignableAction.ReplaceAddToggle ||
+                                    a == QuickMenuAssignableAction.AutoHideGallery ||
+                                    a == QuickMenuAssignableAction.ShowHiddenPackages ||
+                                    a == QuickMenuAssignableAction.FpsCounter ||
+                                    i == m_QuickMenuEditSlotIdx ||
+                                    i == m_QuickMenuPageToggleSlotIdx))
                                 QuickMenuRefreshSlotVisual(i);
                         }
                     }
@@ -1203,6 +1211,8 @@ namespace VPB
         bool m_UIInited = false;
         bool m_AutoFixedGalleryPanePending = false;
         bool m_QuickMenuButtonInited = false;
+        /// <summary>Next unscaled time the fallback quick-menu slot-visual sweep may run (4 Hz).</summary>
+        float m_NextQuickMenuSlotVisualRefreshTime = 0f;
         void Init()
         {
             if (m_FileManager == null)
