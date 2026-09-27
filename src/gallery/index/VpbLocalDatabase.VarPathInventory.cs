@@ -127,6 +127,36 @@ namespace VPB
             }
         }
 
+        /// <summary>Scan roots, mirroring <c>FileManager.RefreshCo</c>'s own list.</summary>
+        static readonly string[] s_VarScanRoots = new[] { "AddonPackages", "AllPackages" };
+
+        /// <summary>
+        /// Every package archive currently under the scan roots, keyed exactly as
+        /// <c>pkg_var_path.path</c> stores it. Returns null if any root could not be enumerated —
+        /// a partial set would look like mass deletions and trigger a needless rebuild.
+        /// </summary>
+        static HashSet<string> TryEnumerateScanRootArchives()
+        {
+            try
+            {
+                var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                for (int r = 0; r < s_VarScanRoots.Length; r++)
+                {
+                    string root = s_VarScanRoots[r];
+                    if (!Directory.Exists(root)) continue;
+                    string[] vars = Directory.GetFiles(root, "*.var", SearchOption.AllDirectories);
+                    for (int i = 0; i < vars.Length; i++) set.Add(vars[i]);
+                    string[] disabled = Directory.GetFiles(root, "*.DISABLED", SearchOption.AllDirectories);
+                    for (int i = 0; i < disabled.Length; i++) set.Add(disabled[i]);
+                }
+                return set;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         static bool TryFastRejectVarPathInventory(
             int rowCount,
             long cachedAddonRootMtimeTicks,
@@ -261,13 +291,71 @@ namespace VPB
                     return false;
                 }
 
-                // Reached here only because TryFastRejectVarPathInventory returned false (root mtime
-                // changed) AND no existing rows failed validation. The only remaining cause is file
-                // additions, which the cached row list cannot reflect. Force disk enum to pick them up.
+                // Reached here only because TryFastRejectVarPathInventory returned false (deep root
+                // mtime moved) AND every cached row still validated. Rebuilding on that alone throws
+                // away a completed 18k-file verification: the deep mtime is the max over every
+                // subfolder, so ANY unrelated write bumps it — a sibling .par2 parity file, a log, a
+                // backup. On a library with a parity tool running (26k .par2 files beside 18k
+                // archives) that fired every single launch, and the rebuild's cost is the ~6s
+                // re-save of rows that had not changed.
+                //
+                // Additions are the one thing the cached rows genuinely cannot show, so check for
+                // them directly instead of assuming them. Enumerating names is far cheaper than the
+                // re-save it avoids, and an exact set match proves the inventory is still current.
+                HashSet<string> onDisk = TryEnumerateScanRootArchives();
+                if (onDisk != null)
+                {
+                    bool identical = onDisk.Count == rows.Count;
+                    if (identical)
+                    {
+                        for (int i = 0; i < rows.Count; i++)
+                        {
+                            if (!onDisk.Contains(rows[i].Path)) { identical = false; break; }
+                        }
+                    }
+
+                    if (identical)
+                    {
+                        paths = new List<string>(rows.Count);
+                        for (int i = 0; i < rows.Count; i++)
+                            paths.Add(rows[i].Path);
+
+                        // Re-stamp the mtime meta so the next launch takes the cheap fast path instead
+                        // of re-validating every file again.
+                        try
+                        {
+                            using (var connStamp = new VpbSqlite3.Connection(DbPath))
+                            {
+                                EnsureSchema(connStamp);
+                                SaveVarPathInventoryRootMeta(connStamp, rows.Count);
+                            }
+                        }
+                        catch { }
+
+                        sw.Stop();
+                        try
+                        {
+                            LogUtil.Log("Var path inventory cache HIT paths=" + paths.Count
+                                + " validate_ms=" + sw.ElapsedMilliseconds
+                                + " mode=validated_no_additions (deep mtime moved, archive set unchanged)");
+                        }
+                        catch { }
+                        return true;
+                    }
+
+                    try
+                    {
+                        LogUtil.Log("Var path inventory cache MISS additions rows=" + rows.Count
+                            + " on_disk=" + onDisk.Count + " validate_ms=" + sw.ElapsedMilliseconds);
+                    }
+                    catch { }
+                    return false;
+                }
+
                 try
                 {
                     LogUtil.Log("Var path inventory cache MISS additions_likely rows=" + rows.Count
-                        + " validate_ms=" + sw.ElapsedMilliseconds);
+                        + " validate_ms=" + sw.ElapsedMilliseconds + " (enumeration unavailable)");
                 }
                 catch { }
                 return false;
