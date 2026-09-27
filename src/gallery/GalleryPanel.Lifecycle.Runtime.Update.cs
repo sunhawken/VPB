@@ -90,31 +90,6 @@ namespace VPB
                 return;
             }
 
-            // Hover attribution: charge this frame to "pointer over the panel" or not, so the cost of
-            // hovering is a measured delta instead of a guess. Diagnostics-only; one branch when off.
-            if (VpbPerfDiag.CachedEnabled && VpbPerfDiag.TryClaimFrame(Time.frameCount))
-            {
-                try
-                {
-                    bool pointerInsideForDiag = IsPointerInsideGalleryWindowRect();
-                    VpbPerfDiag.AccumulateGalleryHoverFrame(pointerInsideForDiag, Time.unscaledDeltaTime);
-                    if (canvas != null && VpbPerfDiag.ShouldSampleGalleryCanvas())
-                    {
-                        int gCount = 0, rtCount = 0;
-                        var graphics = canvas.GetComponentsInChildren<UnityEngine.UI.Graphic>(false);
-                        for (int gi = 0; gi < graphics.Length; gi++)
-                        {
-                            var gr = graphics[gi];
-                            if (gr == null) continue;
-                            gCount++;
-                            if (gr.raycastTarget) rtCount++;
-                        }
-                        VpbPerfDiag.SetGalleryCanvasSample(gCount, rtCount);
-                    }
-                }
-                catch { }
-            }
-
             try { GalleryVrThumbstickScroll.TickOncePerFrame(); } catch { }
             try { DetailStripScrubTick(); } catch { }
 
