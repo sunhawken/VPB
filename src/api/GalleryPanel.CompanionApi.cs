@@ -171,18 +171,30 @@ namespace VPB
 
         private IEnumerator CompanionRandomImportRoutine(string creator, bool usedFallbackTarget)
         {
-            // The filtered pool is rebuilt asynchronously after a creator/category change; picking
-            // before it settles would roll from the previous creator's scenes.
+            // The filtered pool is rebuilt asynchronously after a creator change. Waiting for
+            // "pool is non-empty" is NOT a completion signal — the previous creator's results are
+            // still in currentFilteredFiles, so that condition was already true on the first frame
+            // and every creator change rolled from the OLD creator, taking effect one press late.
+            //
+            // galleryFileRefreshSequence increments at refresh START and refreshCoroutine is null
+            // once it finishes, so "sequence advanced AND coroutine finished" is the real signal.
             yield return null;
+            int seqBefore = GalleryFileRefreshSequence;
             RefreshFilesAndTabs();
 
-            float deadline = Time.unscaledTime + 10f;
+            float deadline = Time.unscaledTime + 20f;
+            bool started = false;
+            bool settled = false;
             while (Time.unscaledTime < deadline)
             {
-                var poolNow = (currentFilteredFiles != null && currentFilteredFiles.Count > 0)
-                    ? currentFilteredFiles : lastFilteredFiles;
-                if (poolNow != null && poolNow.Count > 0) break;
+                if (!started && GalleryFileRefreshSequence != seqBefore) started = true;
+                if (started && refreshCoroutine == null) { settled = true; break; }
                 yield return null;
+            }
+            if (!settled)
+            {
+                LogUtil.LogWarning("[VPB.Api] Random import: gallery refresh did not settle in 20s"
+                    + (started ? "" : " (refresh never started)") + "; rolling from the current pool.");
             }
 
             var pool = (currentFilteredFiles != null && currentFilteredFiles.Count > 0)
@@ -195,11 +207,30 @@ namespace VPB
                 yield break;
             }
 
+            // Second guard: prove the pool really is this creator's before rolling from it. Cheap,
+            // and it turns a silent wrong-creator import into a visible warning.
+            if (!string.IsNullOrEmpty(creator) && !CompanionPoolMatchesCreator(pool, creator))
+            {
+                LogUtil.LogWarning("[VPB.Api] Random import: pool still holds other creators after refresh"
+                    + " (wanted '" + creator + "'); filtering the pick to '" + creator + "'.");
+            }
+
+            // Roll only from entries that actually belong to the requested creator. With "(any)" this
+            // is the whole pool; with a creator it makes a stale pool impossible to mis-roll from.
+            List<FileEntry> candidates = CompanionFilterPoolByCreator(pool, creator);
+            if (candidates.Count == 0)
+            {
+                LogUtil.LogWarning("[VPB.Api] Random import: no scenes by creator '"
+                    + (string.IsNullOrEmpty(creator) ? "(any)" : creator) + "' in a pool of " + pool.Count + ".");
+                _companionFemaleSourceOnly = false;
+                yield break;
+            }
+
             // A scene may contain no female at all; re-roll rather than failing the press.
             const int MaxSceneAttempts = 8;
             for (int attempt = 1; attempt <= MaxSceneAttempts; attempt++)
             {
-                FileEntry pick = pool[UnityEngine.Random.Range(0, pool.Count)];
+                FileEntry pick = candidates[UnityEngine.Random.Range(0, candidates.Count)];
                 if (pick == null) continue;
 
                 LoadSourceScene(pick);
@@ -236,6 +267,51 @@ namespace VPB
             LogUtil.LogWarning("[VPB.Api] Random import: no female source found in " + MaxSceneAttempts
                 + " scenes for creator '" + (string.IsNullOrEmpty(creator) ? "(any)" : creator) + "'.");
             _companionFemaleSourceOnly = false;
+        }
+
+        /// <summary>Creator half of a package uid ("Shapers.SIN4.1:/…" → "Shapers"), or "" for loose files.</summary>
+        private static string CompanionCreatorOf(FileEntry f)
+        {
+            if (f == null) return "";
+            try
+            {
+                string uid = f.Uid;
+                if (string.IsNullOrEmpty(uid)) return "";
+                int colon = uid.IndexOf(":/", StringComparison.Ordinal);
+                string pkg = colon > 0 ? uid.Substring(0, colon) : uid;
+                int dot = pkg.IndexOf('.');
+                return dot > 0 ? pkg.Substring(0, dot) : "";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>Entries by <paramref name="creator"/>; the whole pool when creator is empty ("any").</summary>
+        private static List<FileEntry> CompanionFilterPoolByCreator(List<FileEntry> pool, string creator)
+        {
+            var outList = new List<FileEntry>(pool != null ? pool.Count : 0);
+            if (pool == null) return outList;
+            bool any = string.IsNullOrEmpty(creator);
+            for (int i = 0; i < pool.Count; i++)
+            {
+                FileEntry f = pool[i];
+                if (f == null) continue;
+                if (any || string.Equals(CompanionCreatorOf(f), creator, StringComparison.OrdinalIgnoreCase))
+                    outList.Add(f);
+            }
+            return outList;
+        }
+
+        /// <summary>True when every sampled pool entry belongs to <paramref name="creator"/>.</summary>
+        private static bool CompanionPoolMatchesCreator(List<FileEntry> pool, string creator)
+        {
+            if (pool == null || pool.Count == 0 || string.IsNullOrEmpty(creator)) return true;
+            int sample = Math.Min(pool.Count, 12);
+            for (int i = 0; i < sample; i++)
+            {
+                if (!string.Equals(CompanionCreatorOf(pool[i]), creator, StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+            return true;
         }
 
         /// <summary>
