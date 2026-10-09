@@ -1167,9 +1167,26 @@ namespace VPB
         }
 
         /// <summary>Apply current grid selection via keyboard (Enter/Space). Warm path.</summary>
+        /// <summary>
+        /// True only when the overlay is genuinely on screen and usable for keyboard apply.
+        /// <para>
+        /// <see cref="IsVisible"/> alone is not that test. <see cref="SetCollapsed"/> hides the panel by
+        /// sliding its RectTransform off-screen (and deactivating the content subtree) while leaving
+        /// <c>canvas.enabled</c> true — so a collapsed/auto-hidden dock still reports visible, and
+        /// Enter/Space would apply a selection the user cannot see. The subtree check alone is not
+        /// enough either: <c>ShouldContentSubtreeBeActive</c> returns true while collapsed if content
+        /// has not loaded yet, so the collapsed flag has to be tested explicitly.
+        /// </para>
+        /// </summary>
+        private bool IsOverlayOpenForKeyboardApply()
+        {
+            return IsVisible && !isCollapsed && IsSubtreeActive;
+        }
+
         private void TryKeyboardApplySelection()
         {
-            if (!IsVisible) return;
+            // Enter / Space must do nothing unless the overlay is actually open.
+            if (!IsOverlayOpenForKeyboardApply()) return;
             if (_benchPickModeActive || _stripKeepSubScenePickActive) return;
             if (_removeModeActive) return;
             if (IsSettingsPanelOpen() || settingsListViewActive) return;
