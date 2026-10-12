@@ -1,4 +1,4 @@
-using BepInEx.Configuration;
+﻿using BepInEx.Configuration;
 using System;
 using UnityEngine;
 namespace VPB
@@ -92,6 +92,8 @@ namespace VPB
 
         public ConfigEntry<string> HubHostedOption;
         public ConfigEntry<string> HubPayTypeFilter;
+        public ConfigEntry<bool> HideOlderPackageVersionsInScenes;
+        public ConfigEntry<bool> HideOlderPackageVersionsAllCategories;
         public ConfigEntry<bool> RamDiskStagingEnabled;
         public ConfigEntry<int> RamDiskStagingBudgetMB;
         public ConfigEntry<int> RamDiskStagingMinFreeMB;
@@ -214,6 +216,8 @@ namespace VPB
             LogPerfTelemetry = config.Bind<bool>("Logging", "LogPerfTelemetry", false, "Emit a periodic VPB_PERF_TELEMETRY line with cache sizes, queue depths, panel scroll-listener counts, and heap stats. Enable when diagnosing progressive FPS degradation.");
             LogPerfTelemetryIntervalSeconds = config.Bind<int>("Logging", "LogPerfTelemetryIntervalSeconds", 30, "Seconds between VPB_PERF_TELEMETRY snapshots (clamped 1-30). Only used when LogPerfTelemetry is enabled.");
             LogPerfDiagnostics = config.Bind<bool>("Logging", "LogPerfDiagnostics", false, "Emit a 1Hz VPB.Diag line with per-frame call counters (quick-menu refresh, icon GO churn, gallery Update gating, pointer sibling reorders) plus one-shot transition logs for show/hide/menu-gate. Enable temporarily to pinpoint frame-cost hotspots; disable for normal use.");
+            HideOlderPackageVersionsInScenes = config.Bind<bool>("Gallery", "HideOlderPackageVersionsInScenes", true, "In Scene categories, show one row per scene from the newest package version that contains it, instead of one row per version. Browsing with the Old Versions filter set to Only is unaffected.");
+            HideOlderPackageVersionsAllCategories = config.Bind<bool>("Gallery", "HideOlderPackageVersionsAllCategories", false, "Apply the same newest-version-only collapsing to every category, not just Scenes.");
             RamDiskStagingEnabled = config.Bind<bool>("RamDisk", "StageDisabledPackages", true, "When a RAM disk is mounted (RamDiskAuto), copy .DISABLED archives there for on-demand registration instead of hard-linking them under Cache/VPB/ondemand. RamDiskAuto stages only *.var, so .DISABLED packages get no RAM benefit without this. No effect when no RAM disk is present.");
             RamDiskStagingBudgetMB = config.Bind<int>("RamDisk", "StagingBudgetMB", 768, "Maximum RAM-disk space VPB will use for staged .DISABLED packages (MB, clamped 0-65536). Least-recently-staged copies are evicted first. Keep well below RamDiskAuto's own 3.25GB package budget.");
             RamDiskStagingMinFreeMB = config.Bind<int>("RamDisk", "StagingMinFreeMB", 1536, "Free RAM-disk space VPB refuses to consume (MB, clamped 256-262144). Defaults above RamDiskAuto's 1GB MIN_FREE_BYTES so its own staging never starves because of VPB.");

@@ -778,6 +778,75 @@ namespace VPB
         /// Keep only VAR rows whose uid version is less than the family's highest version (old versions).
         /// Non-VAR entries removed. Mutates list in place.
         /// </summary>
+        /// <summary>
+        /// Family key for collapsing duplicate rows to one per item: package group PLUS the entry's
+        /// internal path.
+        /// <para>
+        /// <see cref="ComputeFamilyKey"/> deliberately keys on the package group alone, which is right
+        /// for version-family questions but fatal here — every scene inside one package shares that
+        /// key, so collapsing on it would leave a single row per package instead of per scene. The
+        /// internal path is what distinguishes "KAMASEX_2 from v3" from "KAMASEX_5 from v3".
+        /// </para>
+        /// Returns null for anything without a package identity (loose files), so callers leave those alone.
+        /// </summary>
+        private static string ComputeItemFamilyKey(FileEntry file)
+        {
+            var vfe = file as VarFileEntry;
+            if (vfe == null) return null;
+
+            string uid = vfe.GetRowPackageUid();
+            if (string.IsNullOrEmpty(uid)) return null;
+            int lastDot = uid.LastIndexOf('.');
+            string group = lastDot > 0 ? uid.Substring(0, lastDot) : uid;
+
+            string internalPath = vfe.InternalPath ?? "";
+            return group + "|" + internalPath;
+        }
+
+        /// <summary>
+        /// Collapses rows that are the same item from several package versions down to the highest
+        /// version only — e.g. Author.Pack.1/.2/.3/.4 all containing Saves/scene/X.json show as one
+        /// row from .4. Entries with no package identity are untouched.
+        /// </summary>
+        public static void ApplyLatestVersionsOnlyFilter(List<FileEntry> files)
+        {
+            if (files == null || files.Count < 2) return;
+
+            var highest = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < files.Count; i++)
+            {
+                string key = ComputeItemFamilyKey(files[i]);
+                if (string.IsNullOrEmpty(key)) continue;
+                int v = GetUidVersionNumber(files[i]);
+                int existing;
+                if (!highest.TryGetValue(key, out existing) || v > existing) highest[key] = v;
+            }
+            if (highest.Count == 0) return;
+
+            // Keep exactly one row per family: the first entry at the winning version. Without the
+            // "already kept" guard, two copies of the SAME version (same scene reachable twice) would
+            // both survive and the duplicate would remain.
+            var kept = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < files.Count; i++)
+            {
+                string key = ComputeItemFamilyKey(files[i]);
+                if (string.IsNullOrEmpty(key)) continue;
+                int top;
+                if (!highest.TryGetValue(key, out top)) continue;
+                if (GetUidVersionNumber(files[i]) == top && !kept.Contains(key))
+                {
+                    kept.Add(key);
+                    continue;
+                }
+                files[i] = null;
+            }
+
+            int w = 0;
+            for (int i = 0; i < files.Count; i++)
+                if (files[i] != null) files[w++] = files[i];
+            if (w < files.Count) files.RemoveRange(w, files.Count - w);
+        }
+
         public static void ApplyOldVersionsOnlyFilter(List<FileEntry> files)
         {
             if (files == null || files.Count == 0) return;

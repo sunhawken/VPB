@@ -4826,6 +4826,36 @@ namespace VPB
             {
                 try { GallerySortManager.ApplyOldVersionsOnlyFilter(list); } catch { }
             }
+            else if (ShouldHideOlderPackageVersions())
+            {
+                // One row per scene, from the newest package version that contains it. Skipped
+                // entirely when the user is explicitly browsing old versions above.
+                try { GallerySortManager.ApplyLatestVersionsOnlyFilter(list); } catch { }
+            }
+        }
+
+        /// <summary>
+        /// Whether the grid should collapse an item that exists in several package versions to the
+        /// newest one. Scenes by default (the reported case); other categories opt in.
+        /// </summary>
+        private bool ShouldHideOlderPackageVersions()
+        {
+            try
+            {
+                var s = Settings.Instance;
+                if (s == null) return false;
+
+                if (s.HideOlderPackageVersionsAllCategories != null
+                    && s.HideOlderPackageVersionsAllCategories.Value)
+                    return true;
+
+                if (s.HideOlderPackageVersionsInScenes == null || !s.HideOlderPackageVersionsInScenes.Value)
+                    return false;
+
+                string title = currentCategoryTitle ?? "";
+                return title.IndexOf("Scene", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            catch { return false; }
         }
 
         /// <summary>Call when <see cref="lastFilteredFiles"/> / grid list mutates without completing <see cref="RefreshFilesRoutine"/>.</summary>
